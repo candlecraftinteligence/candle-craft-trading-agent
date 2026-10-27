@@ -35,7 +35,7 @@ from app.alerts.telegram_outbox import (
 )
 from app.data.dtos import NA
 from app.runtime_epoch.authority import load_active_runtime_epoch, require_active_runtime_epoch
-from app.runtime_epoch.errors import RuntimeEpochOwnershipError
+from app.runtime_epoch.errors import RuntimeEpochError, RuntimeEpochOwnershipError
 from app.runtime_epoch.models import RuntimeEpochIdentity
 from app.runtime_epoch.ownership import (
     decide_public_effect,
@@ -227,8 +227,18 @@ class TelegramOutboxWorker:
                 self._rejected += 1
                 raise TelegramOutboxWorkerSaturated("one telegram outbox operation and one waiter are permitted")
             self._waiters += 1
+
+        lock_cancelled: BaseException | None = None
         try:
-            await self._admission.acquire()
+            if stage == "persistence":
+                acquire_task = asyncio.create_task(self._admission.acquire())
+                _, lock_cancelled = await _fenced_wait(acquire_task)
+                if lock_cancelled is not None and task is not None:
+                    while task.cancelling():
+                        task.uncancel()
+                        uncancel_count += 1
+            else:
+                await self._admission.acquire()
         finally:
             if waiting:
                 self._waiters -= 1
@@ -244,9 +254,22 @@ class TelegramOutboxWorker:
             self._completed += 1
             if cancelled is not None:
                 self._cancelled += 1
+            if lock_cancelled is not None and cancelled is None:
+                cancelled = lock_cancelled
+
             if receipt.error is not None:
                 self._failed += 1
+                if stage == "preparation" and (cancelled is not None or uncancel_count > 0):
+                    if isinstance(receipt.error, (RuntimeEpochOwnershipError, RuntimeEpochError, sqlite3.DatabaseError)):
+                        raise receipt.error from (cancelled or asyncio.CancelledError())
+                    raise (cancelled or asyncio.CancelledError()) from receipt.error
                 raise receipt.error
+
+            if stage == "persistence":
+                if (uncancel_count > 0 or cancelled is not None) and task is not None:
+                    task.cancel()
+                return receipt.value
+
             if uncancel_count > 0 and cancelled is None:
                 cancelled = asyncio.CancelledError()
             if cancelled is not None:
@@ -438,6 +461,85 @@ def stage_1_outbox_preparation(
         connection.close()
 
 
+def normalize_transport_outcome(outcome: Any) -> TelegramTransportOutcome:
+    """Validate and normalize external transport outcome against Telegram provider evidence contracts."""
+    if not isinstance(outcome, TelegramTransportOutcome):
+        return TelegramTransportOutcome(
+            delivery_state=UNCERTAIN,
+            error_category="malformed_transport_outcome",
+            error=f"Transport returned unexpected type: {type(outcome).__name__}",
+        )
+
+    state = str(outcome.delivery_state or "").strip().upper()
+    if state not in {SENT, RETRYABLE, UNCERTAIN, FAILED_FINAL}:
+        return TelegramTransportOutcome(
+            delivery_state=UNCERTAIN,
+            error_category="unknown_delivery_state",
+            error=f"Unrecognized transport state: {outcome.delivery_state}",
+        )
+
+    if state == SENT:
+        # A SENT outcome requires independently supported Telegram acknowledgment evidence
+        msg_id = str(outcome.telegram_message_id or "").strip()
+        if not msg_id or msg_id in (NA, "None", "0"):
+            return TelegramTransportOutcome(
+                delivery_state=UNCERTAIN,
+                http_status=outcome.http_status,
+                telegram_chat_id=outcome.telegram_chat_id,
+                sent_at=outcome.sent_at,
+                error_category="confirmed_success_missing_message_id",
+                error="Telegram success response omitted a valid message ID; acceptance is uncertain.",
+            )
+        if outcome.http_status is not None and outcome.http_status != 200:
+            return TelegramTransportOutcome(
+                delivery_state=UNCERTAIN,
+                http_status=outcome.http_status,
+                telegram_message_id=msg_id,
+                telegram_chat_id=outcome.telegram_chat_id,
+                sent_at=outcome.sent_at,
+                error_category="contradictory_success_http_status",
+                error=f"Transport claimed SENT with non-200 HTTP status: {outcome.http_status}",
+            )
+        if outcome.error not in (None, "", NA):
+            return TelegramTransportOutcome(
+                delivery_state=UNCERTAIN,
+                http_status=outcome.http_status,
+                telegram_message_id=msg_id,
+                telegram_chat_id=outcome.telegram_chat_id,
+                sent_at=outcome.sent_at,
+                error_category="contradictory_success_error",
+                error=f"Transport claimed SENT but reported error: {outcome.error}",
+            )
+        if outcome.rate_limited:
+            return TelegramTransportOutcome(
+                delivery_state=UNCERTAIN,
+                http_status=outcome.http_status,
+                telegram_message_id=msg_id,
+                telegram_chat_id=outcome.telegram_chat_id,
+                sent_at=outcome.sent_at,
+                error_category="contradictory_success_rate_limited",
+                error="Transport claimed SENT while marked rate_limited",
+            )
+        return outcome
+
+    if state == RETRYABLE:
+        # HTTP 5xx or server timeout after transmission may have been accepted upstream.
+        # Fail closed to UNCERTAIN to prevent duplicate public transmissions.
+        if outcome.http_status is not None and 500 <= outcome.http_status <= 599:
+            return TelegramTransportOutcome(
+                delivery_state=UNCERTAIN,
+                http_status=outcome.http_status,
+                telegram_chat_id=outcome.telegram_chat_id,
+                sent_at=outcome.sent_at,
+                error_category="http_5xx_uncertain_acceptance",
+                error=outcome.error or f"Telegram gateway returned HTTP {outcome.http_status}; acceptance is uncertain",
+                retry_after=outcome.retry_after,
+            )
+        return outcome
+
+    return outcome
+
+
 async def stage_2_async_transport(
     receipt: CommittedPartReservationReceipt,
     transport: Callable[[TelegramTransportRequest], Awaitable[TelegramTransportOutcome]],
@@ -462,14 +564,8 @@ async def stage_2_async_transport(
         message_hash=receipt.message_hash,
     )
     try:
-        outcome = await transport(request)
-        if not isinstance(outcome, TelegramTransportOutcome):
-            return TelegramTransportOutcome(
-                delivery_state=UNCERTAIN,
-                error_category="malformed_transport_outcome",
-                error=f"Transport returned unexpected type: {type(outcome).__name__}",
-            )
-        return outcome
+        raw_outcome = await transport(request)
+        return normalize_transport_outcome(raw_outcome)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -555,12 +651,61 @@ def stage_3_outbox_persistence(
                     reservation_id=receipt.reservation_id,
                     detail=f"Persistence error: {type(exc).__name__}: {str(exc)}",
                 )
+                check_ev = connection.execute(
+                    "SELECT delivery_state FROM public_alert_events WHERE id = ?",
+                    (receipt.event_id,),
+                ).fetchone()
+                if check_ev is not None and str(check_ev["delivery_state"] or "").strip().upper() == UNCERTAIN:
+                    connection.execute(
+                        """
+                        UPDATE public_alert_delivery_parts
+                        SET delivery_state = ?, updated_at = ?
+                        WHERE id = ? AND attempt_id = ?
+                        """,
+                        (UNCERTAIN, timestamp, receipt.part_id, receipt.attempt_id),
+                    )
                 connection.commit()
                 state = UNCERTAIN
             except BaseException as fatal_exc:
                 raise PersistenceCommitFailureError(
                     f"Failed to record transport result or uncertainty fallback: {type(fatal_exc).__name__}"
                 ) from fatal_exc
+
+        # MANDATORY COMMIT VERIFICATION (Issue 2)
+        # Independently verify that the requested state was actually committed in SQLite.
+        verified_event = connection.execute(
+            "SELECT id, canonical_reservation_attempt_id, attempt_id, delivery_state FROM public_alert_events WHERE id = ?",
+            (receipt.event_id,),
+        ).fetchone()
+        if verified_event is None:
+            raise PersistenceCommitFailureError(f"Event {receipt.event_id} missing after persistence commit")
+        if int(verified_event["id"]) != receipt.event_id:
+            raise PersistenceCommitFailureError("Event ID mismatch after persistence commit")
+        if verified_event["canonical_reservation_attempt_id"] != receipt.reservation_id:
+            raise PersistenceCommitFailureError("Reservation ID mismatch after persistence commit")
+
+        verified_part = connection.execute(
+            "SELECT id, public_alert_event_id, attempt_id, delivery_state FROM public_alert_delivery_parts WHERE id = ?",
+            (receipt.part_id,),
+        ).fetchone()
+        if verified_part is None:
+            raise PersistenceCommitFailureError(f"Part {receipt.part_id} missing after persistence commit")
+        if int(verified_part["public_alert_event_id"]) != receipt.event_id:
+            raise PersistenceCommitFailureError("Part event association mismatch after persistence commit")
+        if str(verified_part["attempt_id"] or "") != receipt.attempt_id:
+            raise PersistenceCommitFailureError("Part attempt ID mismatch after persistence commit")
+
+        actual_part_state = str(verified_part["delivery_state"] or "").strip().upper()
+        actual_event_state = str(verified_event["delivery_state"] or "").strip().upper()
+
+        if actual_part_state == IN_FLIGHT and state != IN_FLIGHT:
+            raise PersistenceCommitFailureError(
+                f"Part {receipt.part_id} remained IN_FLIGHT after attempted persistence to {state}"
+            )
+        if state == UNCERTAIN and (actual_event_state != UNCERTAIN or actual_part_state != UNCERTAIN):
+            raise PersistenceCommitFailureError(
+                f"Event {receipt.event_id} remained in state {actual_event_state} after fallback to UNCERTAIN"
+            )
 
         parts = list_outbox_parts(connection, event_id=receipt.event_id)
         all_sent = bool(parts) and all(p.delivery_state == SENT for p in parts)
@@ -612,19 +757,20 @@ async def deliver_single_reserved_part(
             attempt_id=attempt_id,
             stage="preparation",
         )
-    except OutboxClaimRejected as exc:
+    except (OutboxClaimRejected, OutboxPreparationError, RuntimeEpochOwnershipError, RuntimeEpochError) as exc:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError() from exc
+        status_label = "skipped" if isinstance(exc, OutboxClaimRejected) else "blocked"
         return TelegramDeliveryProtocolResult(
-            status="skipped",
+            status=status_label,
             error_message=str(exc),
-            detail="Outbox claim rejected by state machine",
-        )
-    except OutboxPreparationError as exc:
-        return TelegramDeliveryProtocolResult(
-            status="blocked",
-            error_message=str(exc),
-            detail="Outbox preparation validation failed",
+            detail=f"Outbox preparation stopped by authority: {type(exc).__name__}",
         )
     except Exception as exc:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError() from exc
         return TelegramDeliveryProtocolResult(
             status="failed",
             error_message=f"{type(exc).__name__}: {str(exc)}",
@@ -637,10 +783,10 @@ async def deliver_single_reserved_part(
         raise asyncio.CancelledError()
 
     # Stage 2: Transport
-    pending_cancellation: asyncio.CancelledError | None = None
+    pending_cancellation: BaseException | None = None
     try:
         transport_outcome = await stage_2_async_transport(receipt, transport)
-    except asyncio.CancelledError as cancel_exc:
+    except (asyncio.CancelledError, KeyboardInterrupt) as cancel_exc:
         pending_cancellation = cancel_exc
         transport_outcome = TelegramTransportOutcome(
             delivery_state=UNCERTAIN,
@@ -678,8 +824,11 @@ async def deliver_single_reserved_part(
             detail="Persistence worker failure after HTTP transmission",
         )
 
+    task = asyncio.current_task()
     if pending_cancellation is not None:
         raise pending_cancellation
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError()
 
     status_label = durable_receipt.delivery_state.lower()
     return TelegramDeliveryProtocolResult(

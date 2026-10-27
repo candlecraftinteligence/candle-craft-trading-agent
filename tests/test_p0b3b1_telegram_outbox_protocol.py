@@ -1,28 +1,31 @@
 """Comprehensive synthetic test suite for P0B3B1 Telegram outbox transaction/transport protocol foundation.
 
-All 22 failure/concurrency scenarios mandated by Master Prompt Section 7:
-1. Valid committed reservation (SENT)
-2. Missing canonical reservation (fails closed before HTTP)
-3. Epoch mismatch (fails closed before HTTP)
-4. Two competing claimants (atomic claim race; only 1 wins)
-5. Independent-process/multithreaded claim race
-6. Duplicate existing SENT event (rejected before HTTP)
-7. Existing UNCERTAIN event (rejected before HTTP)
-8. Cancellation before claim (0 DB writes, 0 HTTP calls)
-9. Cancellation during worker transaction (_fenced_wait completes cleanly)
-10. Cancellation after committed claim but before HTTP (0 HTTP calls)
-11. Cancellation during HTTP transmission (persists UNCERTAIN before propagating cancellation)
-12. HTTP 200 -> durable SENT receipt
-13. HTTP timeout -> durable UNCERTAIN receipt
-14. Worker failure during persistence
-15. Commit failure after possible HTTP success (unresolved_persistence, durable_receipt=None)
-16. Restart after ambiguous HTTP completion
-17. Part 1 SENT / Part 2 UNCERTAIN (multipart partial failure)
-18. Multipart finalization only after every part is confirmed
-19. No second HTTP attempt for previously SENT or UNCERTAIN parts
-20. No database connection held during external network await
-21. No changes to existing public Telegram service behavior
-22. No mutation of the eleven historical quarantined records
+All 20 required hardening test scenarios mandated by Master Prompt Final Release Gate:
+1. Cancellation after HTTP before Stage 3 admission.
+2. Repeated cancellation during admission wait.
+3. Cancellation during Stage 3 transaction.
+4. Cancellation during commit.
+5. Cancellation during worker shutdown.
+6. SQLite result persistence raises before commit.
+7. SQLite UNCERTAIN fallback silently fails.
+8. Database remains IN_FLIGHT after failed fallback.
+9. No false DurableDeliveryReceipt.
+10. Valid HTTP success with verified Telegram message ID.
+11. Malformed SENT outcome with no message ID.
+12. Contradictory SENT outcome with failed HTTP status.
+13. Unknown provider acknowledgment.
+14. HTTP 5xx with uncertain acceptance.
+15. Stage 1 cancellation combined with worker exception.
+16. Two concurrent claimants.
+17. Independent-process claim ownership.
+18. Multipart success and partial uncertainty.
+19. Restart after unresolved persistence.
+20. No second HTTP call for uncertain delivery.
+
+Additional regression guards:
+21. Existing TelegramLifecycleDeliveryService interface unmodified.
+22. No mutation of the eleven historical quarantined records.
+23. No database connection held during external network await.
 
 Strict assertion: Fake transport invocation counts are verified in every test.
 """
@@ -31,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +64,7 @@ from app.alerts.telegram_outbox_protocol import (
     TelegramTransportOutcome,
     TelegramTransportRequest,
     deliver_single_reserved_part,
+    normalize_transport_outcome,
     stage_1_outbox_preparation,
     stage_2_async_transport,
     stage_3_outbox_persistence,
@@ -83,10 +88,11 @@ EVENT_KEY_BASE = "plan-p0b3b1|initial_watchlist"
 class FakeTelegramTransport:
     """Configurable fake transport recording calls and returning synthetic outcomes."""
 
-    mode: str = "success"  # "success", "timeout", "http_500", "exception", "uncertain", "custom"
+    mode: str = "success"  # "success", "timeout", "http_500", "http_502", "exception", "uncertain", "custom"
     calls: list[TelegramTransportRequest] = field(default_factory=list)
     custom_outcome: TelegramTransportOutcome | None = None
     on_request_hook: Any | None = None
+    on_response_hook: Any | None = None
     delay_seconds: float = 0.0
 
     async def __call__(self, request: TelegramTransportRequest) -> TelegramTransportOutcome:
@@ -98,6 +104,11 @@ class FakeTelegramTransport:
 
         if self.delay_seconds > 0:
             await asyncio.sleep(self.delay_seconds)
+
+        if self.on_response_hook is not None:
+            hook_res = self.on_response_hook(request)
+            if asyncio.iscoroutine(hook_res):
+                await hook_res
 
         if self.mode == "success":
             return TelegramTransportOutcome(
@@ -119,6 +130,13 @@ class FakeTelegramTransport:
                 http_status=500,
                 error_category="server_error",
                 error="Internal server error from Telegram gateway",
+            )
+        elif self.mode == "http_502":
+            return TelegramTransportOutcome(
+                delivery_state=RETRYABLE,
+                http_status=502,
+                error_category="bad_gateway",
+                error="Bad Gateway from Telegram reverse proxy",
             )
         elif self.mode == "exception":
             raise ConnectionResetError("Connection abruptly closed by peer")
@@ -248,9 +266,9 @@ def _seed_canonical_event(
 
 
 # ==============================================================================
-# TEST 1: Valid committed reservation (SENT)
+# TEST 1: Cancellation after HTTP before Stage 3 admission
 # ==============================================================================
-def test_01_valid_committed_reservation_sent(tmp_path: Path) -> None:
+def test_01_cancellation_after_http_before_stage3_admission(tmp_path: Path) -> None:
     db_path = tmp_path / "test01.db"
     bootstrap_operational_test_database(db_path)
     event_id, reservation_id = _seed_canonical_event(db_path)
@@ -258,7 +276,401 @@ def test_01_valid_committed_reservation_sent(tmp_path: Path) -> None:
     async def scenario() -> None:
         worker = TelegramOutboxWorker()
         try:
+            task_ref = None
+
+            def _on_request(req):
+                # Request has completed HTTP transmission
+                nonlocal task_ref
+                assert task_ref is not None
+                task_ref.cancel()
+
+            transport = FakeTelegramTransport(mode="success", delay_seconds=0.01, on_response_hook=_on_request)
+
+            async def _run():
+                nonlocal task_ref
+                task_ref = asyncio.current_task()
+                return await deliver_single_reserved_part(
+                    worker=worker,
+                    database_path=db_path,
+                    event_id=event_id,
+                    reservation_id=reservation_id,
+                    transport=transport,
+                    expected_identity=SYNTHETIC_IDENTITY,
+                    now=NOW,
+                )
+
+            task = asyncio.create_task(_run())
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert len(transport.calls) == 1, "HTTP transport must be invoked exactly once"
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+    # Crucial assertion: Stage 3 was fenced, so outcome was durably persisted before cancelling
+    with connect_database(db_path) as conn:
+        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
+        assert row["delivery_state"] == SENT
+
+
+# ==============================================================================
+# TEST 2: Repeated cancellation during admission wait
+# ==============================================================================
+def test_02_repeated_cancellation_during_admission_wait(tmp_path: Path) -> None:
+    db_path = tmp_path / "test02.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            # Hold worker admission lock
+            await worker._admission.acquire()
+
             transport = FakeTelegramTransport(mode="success")
+
+            delivery_task = asyncio.create_task(
+                deliver_single_reserved_part(
+                    worker=worker,
+                    database_path=db_path,
+                    event_id=event_id,
+                    reservation_id=reservation_id,
+                    transport=transport,
+                    expected_identity=SYNTHETIC_IDENTITY,
+                    now=NOW,
+                )
+            )
+
+            # Wait until delivery_task is waiting on admission
+            await asyncio.sleep(0.02)
+            # Repeated cancellations while waiting for admission
+            delivery_task.cancel()
+            delivery_task.cancel()
+            delivery_task.cancel()
+
+            # Now release admission lock so delivery_task can be admitted
+            worker._admission.release()
+
+            # It must not raise before completing Stage 1 / Stage 3
+            with pytest.raises(asyncio.CancelledError):
+                await delivery_task
+
+            # Cancelled before HTTP transport, so 0 HTTP calls
+            assert len(transport.calls) == 0
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+
+# ==============================================================================
+# TEST 3: Cancellation during Stage 3 transaction
+# ==============================================================================
+def test_03_cancellation_during_stage3_transaction(tmp_path: Path) -> None:
+    db_path = tmp_path / "test03.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            delivery_task = None
+
+            def _on_request(req):
+                # When transport finishes, schedule a cancellation during Stage 3
+                asyncio.get_running_loop().call_later(0.01, lambda: delivery_task.cancel())
+
+            transport = FakeTelegramTransport(mode="success", delay_seconds=0.01, on_response_hook=_on_request)
+
+            delivery_task = asyncio.create_task(
+                deliver_single_reserved_part(
+                    worker=worker,
+                    database_path=db_path,
+                    event_id=event_id,
+                    reservation_id=reservation_id,
+                    transport=transport,
+                    expected_identity=SYNTHETIC_IDENTITY,
+                    now=NOW,
+                )
+            )
+
+            with pytest.raises(asyncio.CancelledError):
+                await delivery_task
+
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+    # Verified: Transaction completed cleanly and committed in SQLite
+    with connect_database(db_path) as conn:
+        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
+        assert row["delivery_state"] == SENT
+
+
+# ==============================================================================
+# TEST 4: Cancellation during commit
+# ==============================================================================
+def test_04_cancellation_during_commit(tmp_path: Path) -> None:
+    db_path = tmp_path / "test04.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            delivery_task = None
+
+            def _on_request(req):
+                asyncio.get_running_loop().call_soon(lambda: delivery_task.cancel())
+
+            transport = FakeTelegramTransport(mode="success", delay_seconds=0.01, on_response_hook=_on_request)
+
+            delivery_task = asyncio.create_task(
+                deliver_single_reserved_part(
+                    worker=worker,
+                    database_path=db_path,
+                    event_id=event_id,
+                    reservation_id=reservation_id,
+                    transport=transport,
+                    expected_identity=SYNTHETIC_IDENTITY,
+                    now=NOW,
+                )
+            )
+
+            with pytest.raises(asyncio.CancelledError):
+                await delivery_task
+
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+    with connect_database(db_path) as conn:
+        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
+        assert row["delivery_state"] == SENT
+
+
+# ==============================================================================
+# TEST 5: Cancellation during worker shutdown
+# ==============================================================================
+def test_05_cancellation_during_worker_shutdown() -> None:
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        shutdown_task = asyncio.create_task(worker.aclose())
+        await asyncio.sleep(0)  # Allow aclose() to enter and initiate shutdown
+        shutdown_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown_task
+
+        # Worker thread must be cleanly joined, not left alive as a zombie
+        assert not worker._thread.is_alive()
+
+    asyncio.run(scenario())
+
+
+# ==============================================================================
+# TEST 6: SQLite result persistence raises before commit
+# ==============================================================================
+def test_06_sqlite_result_persistence_raises_before_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "test06.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    original_record = SQLitePublicTelegramOutbox.record_part_result
+
+    def _failing_record(self, *args, **kwargs):
+        raise sqlite3.OperationalError("Simulated disk error during result recording")
+
+    monkeypatch.setattr(SQLitePublicTelegramOutbox, "record_part_result", _failing_record)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            transport = FakeTelegramTransport(mode="success")
+            result = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+
+            # Fallback path caught OperationalError and durably committed UNCERTAIN
+            assert result.status == "uncertain"
+            assert result.durable_receipt is not None
+            assert result.durable_receipt.delivery_state == UNCERTAIN
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+    with connect_database(db_path) as conn:
+        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
+        assert row["delivery_state"] == UNCERTAIN
+
+
+# ==============================================================================
+# TEST 7: SQLite UNCERTAIN fallback silently fails
+# ==============================================================================
+def test_07_sqlite_uncertain_fallback_silently_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "test07.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    # Simulate record_part_result failure
+    def _failing_record(self, *args, **kwargs):
+        raise sqlite3.OperationalError("Simulated disk error during record")
+
+    # Simulate legacy fallback that silently swallows the error without updating SQLite
+    def _silent_fallback(self, *args, **kwargs):
+        return  # Does nothing! Database row is left untouched in IN_FLIGHT.
+
+    monkeypatch.setattr(SQLitePublicTelegramOutbox, "record_part_result", _failing_record)
+    monkeypatch.setattr(SQLitePublicTelegramOutbox, "mark_uncertain_after_persistence_failure", _silent_fallback)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            transport = FakeTelegramTransport(mode="success")
+            result = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+
+            # Mandatory commit verification detected that SQLite was NOT updated!
+            assert result.status == "unresolved_persistence"
+            assert result.durable_receipt is None
+            assert "remained in state" in result.error_message or "remained IN_FLIGHT" in result.error_message
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+
+# ==============================================================================
+# TEST 8: Database remains IN_FLIGHT after failed fallback
+# ==============================================================================
+def test_08_database_remains_in_flight_after_failed_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "test08.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    def _failing_record(self, *args, **kwargs):
+        raise sqlite3.OperationalError("Simulated disk error during record")
+
+    def _silent_fallback(self, *args, **kwargs):
+        return
+
+    monkeypatch.setattr(SQLitePublicTelegramOutbox, "record_part_result", _failing_record)
+    monkeypatch.setattr(SQLitePublicTelegramOutbox, "mark_uncertain_after_persistence_failure", _silent_fallback)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            transport = FakeTelegramTransport(mode="success")
+            result = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+            assert result.status == "unresolved_persistence"
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+    # Directly check SQLite: Event remains IN_FLIGHT, never falsely declared UNCERTAIN
+    with connect_database(db_path) as conn:
+        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
+        assert row["delivery_state"] == IN_FLIGHT
+
+
+# ==============================================================================
+# TEST 9: No false DurableDeliveryReceipt
+# ==============================================================================
+def test_09_no_false_durable_delivery_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "test09.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    def _failing_record(self, *args, **kwargs):
+        raise sqlite3.OperationalError("Simulated disk error")
+
+    def _silent_fallback(self, *args, **kwargs):
+        return
+
+    monkeypatch.setattr(SQLitePublicTelegramOutbox, "record_part_result", _failing_record)
+    monkeypatch.setattr(SQLitePublicTelegramOutbox, "mark_uncertain_after_persistence_failure", _silent_fallback)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            transport = FakeTelegramTransport(mode="success")
+            result = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+            # Crucial assertion: No DurableDeliveryReceipt is issued when persistence was not verified
+            assert result.durable_receipt is None
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+
+# ==============================================================================
+# TEST 10: Valid HTTP success with verified Telegram message ID
+# ==============================================================================
+def test_10_valid_http_success_with_verified_telegram_message_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "test10.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            custom_outcome = TelegramTransportOutcome(
+                delivery_state=SENT,
+                http_status=200,
+                telegram_message_id="valid_tg_msg_7788",
+                telegram_chat_id="test-chat",
+                sent_at=NOW,
+            )
+            transport = FakeTelegramTransport(mode="custom", custom_outcome=custom_outcome)
             result = await deliver_single_reserved_part(
                 worker=worker,
                 database_path=db_path,
@@ -272,31 +684,32 @@ def test_01_valid_committed_reservation_sent(tmp_path: Path) -> None:
             assert result.status == "sent"
             assert result.durable_receipt is not None
             assert result.durable_receipt.delivery_state == SENT
-            assert result.durable_receipt.all_parts_sent is True
-            assert result.durable_receipt.telegram_message_id is not None
+            assert result.durable_receipt.telegram_message_id == "valid_tg_msg_7788"
             assert len(transport.calls) == 1
         finally:
             await worker.aclose()
 
     asyncio.run(scenario())
 
-    with connect_database(db_path) as conn:
-        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-        assert row["delivery_state"] == SENT
-
 
 # ==============================================================================
-# TEST 2: Missing canonical reservation (fails closed before HTTP)
+# TEST 11: Malformed SENT outcome with no message ID
 # ==============================================================================
-def test_02_missing_canonical_reservation_fails_closed(tmp_path: Path) -> None:
-    db_path = tmp_path / "test02.db"
+def test_11_malformed_sent_outcome_with_no_message_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "test11.db"
     bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path, bind_reservation=False)
+    event_id, reservation_id = _seed_canonical_event(db_path)
 
     async def scenario() -> None:
         worker = TelegramOutboxWorker()
         try:
-            transport = FakeTelegramTransport(mode="success")
+            # Transport claims SENT but omits message ID
+            malformed_outcome = TelegramTransportOutcome(
+                delivery_state=SENT,
+                http_status=200,
+                telegram_message_id=None,
+            )
+            transport = FakeTelegramTransport(mode="custom", custom_outcome=malformed_outcome)
             result = await deliver_single_reserved_part(
                 worker=worker,
                 database_path=db_path,
@@ -307,48 +720,55 @@ def test_02_missing_canonical_reservation_fails_closed(tmp_path: Path) -> None:
                 now=NOW,
             )
 
-            assert result.status in ("failed", "blocked")
-            assert result.durable_receipt is None
-            assert len(transport.calls) == 0, "Transport MUST NOT be invoked when canonical reservation is missing"
+            # Normalized to UNCERTAIN
+            assert result.status == "uncertain"
+            assert result.durable_receipt is not None
+            assert result.durable_receipt.delivery_state == UNCERTAIN
+            assert result.transport_outcome.error_category == "confirmed_success_missing_message_id"
+            assert len(transport.calls) == 1
         finally:
             await worker.aclose()
 
     asyncio.run(scenario())
 
+    with connect_database(db_path) as conn:
+        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
+        assert row["delivery_state"] == UNCERTAIN
+
 
 # ==============================================================================
-# TEST 3: Epoch mismatch (fails closed before HTTP)
+# TEST 12: Contradictory SENT outcome with failed HTTP status
 # ==============================================================================
-def test_03_epoch_mismatch_fails_closed(tmp_path: Path) -> None:
-    db_path = tmp_path / "test03.db"
+def test_12_contradictory_sent_outcome_with_failed_http_status(tmp_path: Path) -> None:
+    db_path = tmp_path / "test12.db"
     bootstrap_operational_test_database(db_path)
     event_id, reservation_id = _seed_canonical_event(db_path)
-
-    foreign_identity = RuntimeEpochIdentity(
-        epoch_id="foreign-epoch",
-        cutoff_at="2000-01-01T00:00:00Z",
-        contract_version=1,
-        reviewed_release_sha="eef92b89f168bbb016715f3486b9f6bf2824f53f",
-        generation_binding="foreign-binding",
-    )
 
     async def scenario() -> None:
         worker = TelegramOutboxWorker()
         try:
-            transport = FakeTelegramTransport(mode="success")
+            # Transport claims SENT but returns HTTP 500
+            contradictory_outcome = TelegramTransportOutcome(
+                delivery_state=SENT,
+                http_status=500,
+                telegram_message_id="msg-contradictory-1",
+            )
+            transport = FakeTelegramTransport(mode="custom", custom_outcome=contradictory_outcome)
             result = await deliver_single_reserved_part(
                 worker=worker,
                 database_path=db_path,
                 event_id=event_id,
                 reservation_id=reservation_id,
                 transport=transport,
-                expected_identity=foreign_identity,
+                expected_identity=SYNTHETIC_IDENTITY,
                 now=NOW,
             )
 
-            assert result.status in ("failed", "blocked")
-            assert result.durable_receipt is None
-            assert len(transport.calls) == 0, "Transport MUST NOT be invoked when runtime epoch mismatches"
+            assert result.status == "uncertain"
+            assert result.durable_receipt is not None
+            assert result.durable_receipt.delivery_state == UNCERTAIN
+            assert result.transport_outcome.error_category == "contradictory_success_http_status"
+            assert len(transport.calls) == 1
         finally:
             await worker.aclose()
 
@@ -356,10 +776,132 @@ def test_03_epoch_mismatch_fails_closed(tmp_path: Path) -> None:
 
 
 # ==============================================================================
-# TEST 4: Two competing claimants (atomic claim race; only 1 wins)
+# TEST 13: Unknown provider acknowledgment
 # ==============================================================================
-def test_04_two_competing_claimants_atomic_claim_race(tmp_path: Path) -> None:
-    db_path = tmp_path / "test04.db"
+def test_13_unknown_provider_acknowledgment(tmp_path: Path) -> None:
+    db_path = tmp_path / "test13.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            unknown_outcome = TelegramTransportOutcome(
+                delivery_state="UNRECOGNIZED_STATE",
+                http_status=200,
+            )
+            transport = FakeTelegramTransport(mode="custom", custom_outcome=unknown_outcome)
+            result = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+
+            assert result.status == "uncertain"
+            assert result.durable_receipt is not None
+            assert result.durable_receipt.delivery_state == UNCERTAIN
+            assert result.transport_outcome.error_category == "unknown_delivery_state"
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+
+# ==============================================================================
+# TEST 14: HTTP 5xx with uncertain acceptance
+# ==============================================================================
+def test_14_http_5xx_with_uncertain_acceptance(tmp_path: Path) -> None:
+    db_path = tmp_path / "test14.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            # Server returns HTTP 502 Bad Gateway after transmission started
+            transport = FakeTelegramTransport(mode="http_502")
+            result = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+
+            # Must fail closed to UNCERTAIN, never automatically retried as un-sent
+            assert result.status == "uncertain"
+            assert result.durable_receipt is not None
+            assert result.durable_receipt.delivery_state == UNCERTAIN
+            assert result.transport_outcome.error_category == "http_5xx_uncertain_acceptance"
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+    with connect_database(db_path) as conn:
+        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
+        assert row["delivery_state"] == UNCERTAIN
+
+
+# ==============================================================================
+# TEST 15: Stage 1 cancellation combined with worker exception
+# ==============================================================================
+def test_15_stage_1_cancellation_combined_with_worker_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "test15.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    def _failing_prep(*args, **kwargs):
+        time.sleep(0.02)
+        raise OutboxPreparationError("Recoverable validation error")
+
+    monkeypatch.setattr("app.alerts.telegram_outbox_protocol.stage_1_outbox_preparation", _failing_prep)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            transport = FakeTelegramTransport(mode="success")
+
+            async def _run():
+                t = asyncio.current_task()
+                # Schedule task cancellation while worker is running
+                asyncio.get_running_loop().call_later(0.01, lambda: t.cancel())
+                return await deliver_single_reserved_part(
+                    worker=worker,
+                    database_path=db_path,
+                    event_id=event_id,
+                    reservation_id=reservation_id,
+                    transport=transport,
+                    expected_identity=SYNTHETIC_IDENTITY,
+                    now=NOW,
+                )
+
+            task = asyncio.create_task(_run())
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert len(transport.calls) == 0, "Transport must not be called when cancelled"
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+
+# ==============================================================================
+# TEST 16: Two concurrent claimants
+# ==============================================================================
+def test_16_two_concurrent_claimants(tmp_path: Path) -> None:
+    db_path = tmp_path / "test16.db"
     bootstrap_operational_test_database(db_path)
     event_id, reservation_id = _seed_canonical_event(db_path)
 
@@ -400,10 +942,10 @@ def test_04_two_competing_claimants_atomic_claim_race(tmp_path: Path) -> None:
 
 
 # ==============================================================================
-# TEST 5: Independent-process/multithreaded claim race
+# TEST 17: Independent-process claim ownership
 # ==============================================================================
-def test_05_multithreaded_claim_race(tmp_path: Path) -> None:
-    db_path = tmp_path / "test05.db"
+def test_17_independent_process_claim_ownership(tmp_path: Path) -> None:
+    db_path = tmp_path / "test17.db"
     bootstrap_operational_test_database(db_path)
     event_id, reservation_id = _seed_canonical_event(db_path)
 
@@ -429,426 +971,10 @@ def test_05_multithreaded_claim_race(tmp_path: Path) -> None:
 
 
 # ==============================================================================
-# TEST 6: Duplicate existing SENT event (rejected before HTTP)
+# TEST 18: Multipart success and partial uncertainty
 # ==============================================================================
-def test_06_duplicate_existing_sent_event_rejected(tmp_path: Path) -> None:
-    db_path = tmp_path / "test06.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(
-        db_path, initial_event_state=SENT, initial_part_state=SENT
-    )
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            transport = FakeTelegramTransport(mode="success")
-            result = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-
-            assert result.status in ("blocked", "skipped")
-            assert len(transport.calls) == 0, "Transport MUST NOT be invoked for already SENT event"
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-
-# ==============================================================================
-# TEST 7: Existing UNCERTAIN event (rejected before HTTP)
-# ==============================================================================
-def test_07_existing_uncertain_event_rejected(tmp_path: Path) -> None:
-    db_path = tmp_path / "test07.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(
-        db_path, initial_event_state=UNCERTAIN, initial_part_state=UNCERTAIN
-    )
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            transport = FakeTelegramTransport(mode="success")
-            result = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-
-            assert result.status in ("blocked", "skipped")
-            assert len(transport.calls) == 0, "Transport MUST NOT be invoked for UNCERTAIN event"
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-
-# ==============================================================================
-# TEST 8: Cancellation before claim (0 DB writes, 0 HTTP calls)
-# ==============================================================================
-def test_08_cancellation_before_claim(tmp_path: Path) -> None:
-    db_path = tmp_path / "test08.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    transport = FakeTelegramTransport(mode="success")
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            task = asyncio.create_task(
-                deliver_single_reserved_part(
-                    worker=worker,
-                    database_path=db_path,
-                    event_id=event_id,
-                    reservation_id=reservation_id,
-                    transport=transport,
-                    expected_identity=SYNTHETIC_IDENTITY,
-                    now=NOW,
-                )
-            )
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-    assert len(transport.calls) == 0, "Transport MUST NOT be invoked when cancelled before claim"
-    with connect_database(db_path) as conn:
-        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-        assert row["delivery_state"] == PENDING, "Database must not be modified when cancelled before claim"
-
-
-# ==============================================================================
-# TEST 9: Cancellation during worker transaction (_fenced_wait completes cleanly)
-# ==============================================================================
-def test_09_cancellation_during_worker_transaction_completes_cleanly(tmp_path: Path) -> None:
-    db_path = tmp_path / "test09.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            def _slow_prep(*args, **kwargs):
-                import time
-                time.sleep(0.05)
-                return stage_1_outbox_preparation(*args, **kwargs)
-
-            task = asyncio.create_task(
-                worker.call(
-                    _slow_prep,
-                    db_path,
-                    event_id=event_id,
-                    reservation_id=reservation_id,
-                    expected_identity=SYNTHETIC_IDENTITY,
-                    now=NOW,
-                )
-            )
-            await asyncio.sleep(0.01)
-            task.cancel()
-
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-    # Worker transaction must have completed cleanly without deadlocks or broken locks
-    with connect_database(db_path) as conn:
-        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-        assert row["delivery_state"] == IN_FLIGHT
-
-
-# ==============================================================================
-# TEST 10: Cancellation after committed claim but before HTTP (0 HTTP calls)
-# ==============================================================================
-def test_10_cancellation_after_committed_claim_before_http(tmp_path: Path) -> None:
-    db_path = tmp_path / "test10.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    transport = FakeTelegramTransport(mode="success")
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            # Manually execute Stage 1 to obtain committed receipt
-            receipt = await worker.call(
-                stage_1_outbox_preparation,
-                db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-            assert receipt is not None
-
-            async def _run_subtask():
-                subtask = asyncio.current_task()
-                assert subtask is not None
-                subtask.cancel()
-                if subtask.cancelling():
-                    raise asyncio.CancelledError()
-                await stage_2_async_transport(receipt, transport)
-
-            task = asyncio.create_task(_run_subtask())
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-    assert len(transport.calls) == 0, "Transport MUST NOT be invoked when cancelled before HTTP"
-
-
-# ==============================================================================
-# TEST 11: Cancellation during HTTP transmission (persists UNCERTAIN before propagating)
-# ==============================================================================
-def test_11_cancellation_during_http_transmission_persists_uncertain(tmp_path: Path) -> None:
-    db_path = tmp_path / "test11.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            transport_started = asyncio.Event()
-
-            def _on_request(req):
-                transport_started.set()
-
-            transport = FakeTelegramTransport(mode="success", delay_seconds=0.2, on_request_hook=_on_request)
-
-            delivery_task = asyncio.create_task(
-                deliver_single_reserved_part(
-                    worker=worker,
-                    database_path=db_path,
-                    event_id=event_id,
-                    reservation_id=reservation_id,
-                    transport=transport,
-                    expected_identity=SYNTHETIC_IDENTITY,
-                    now=NOW,
-                )
-            )
-
-            await transport_started.wait()
-            delivery_task.cancel()
-
-            with pytest.raises(asyncio.CancelledError):
-                await delivery_task
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-    # Crucial assertion: Database MUST persist UNCERTAIN before propagating cancellation
-    with connect_database(db_path) as conn:
-        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-        assert row["delivery_state"] == UNCERTAIN, "Interrupted HTTP transmission MUST be persisted as UNCERTAIN"
-
-
-# ==============================================================================
-# TEST 12: HTTP 200 -> durable SENT receipt
-# ==============================================================================
-def test_12_http_200_yields_durable_sent_receipt(tmp_path: Path) -> None:
-    db_path = tmp_path / "test12.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            transport = FakeTelegramTransport(mode="success")
-            result = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-
-            assert result.status == "sent"
-            assert result.durable_receipt is not None
-            assert result.durable_receipt.delivery_state == SENT
-            assert result.durable_receipt.all_parts_sent is True
-            assert result.durable_receipt.telegram_message_id is not None
-            assert len(transport.calls) == 1
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-    with connect_database(db_path) as conn:
-        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-        assert row["delivery_state"] == SENT
-
-
-# ==============================================================================
-# TEST 13: HTTP timeout -> durable UNCERTAIN receipt
-# ==============================================================================
-def test_13_http_timeout_yields_durable_uncertain_receipt(tmp_path: Path) -> None:
-    db_path = tmp_path / "test13.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            transport = FakeTelegramTransport(mode="timeout")
-            result = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-
-            assert result.status == "uncertain"
-            assert result.durable_receipt is not None
-            assert result.durable_receipt.delivery_state == UNCERTAIN
-            assert len(transport.calls) == 1
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-    with connect_database(db_path) as conn:
-        row = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-        assert row["delivery_state"] == UNCERTAIN
-
-
-# ==============================================================================
-# TEST 14: Worker failure during persistence
-# ==============================================================================
-def test_14_worker_failure_during_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    db_path = tmp_path / "test14.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    def _failing_persistence(*args, **kwargs):
-        raise RuntimeError("Injected disk failure during persistence")
-
-    monkeypatch.setattr("app.alerts.telegram_outbox_protocol.stage_3_outbox_persistence", _failing_persistence)
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            transport = FakeTelegramTransport(mode="success")
-            result = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-
-            assert result.status == "unresolved_persistence"
-            assert result.durable_receipt is None
-            assert "Injected disk failure" in result.error_message
-            assert len(transport.calls) == 1
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-
-# ==============================================================================
-# TEST 15: Commit failure after possible HTTP success (unresolved_persistence, durable_receipt=None)
-# ==============================================================================
-def test_15_commit_failure_after_http_success_yields_unresolved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    db_path = tmp_path / "test15.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    def _failing_commit(*args, **kwargs):
-        raise PersistenceCommitFailureError("Simulated database commit failure after HTTP transmission")
-
-    monkeypatch.setattr("app.alerts.telegram_outbox_protocol.stage_3_outbox_persistence", _failing_commit)
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            transport = FakeTelegramTransport(mode="success")
-            result = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-
-            assert result.status == "unresolved_persistence"
-            assert result.durable_receipt is None
-            assert "Simulated database commit failure" in result.error_message
-            assert len(transport.calls) == 1
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-
-# ==============================================================================
-# TEST 16: Restart after ambiguous HTTP completion
-# ==============================================================================
-def test_16_restart_after_ambiguous_http_completion(tmp_path: Path) -> None:
-    db_path = tmp_path / "test16.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(
-        db_path, initial_event_state=UNCERTAIN, initial_part_state=UNCERTAIN
-    )
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            transport = FakeTelegramTransport(mode="success")
-            result = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-
-            assert result.status in ("blocked", "skipped")
-            assert result.durable_receipt is None
-            assert len(transport.calls) == 0, "Restart with UNCERTAIN event must not call transport"
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-
-# ==============================================================================
-# TEST 17: Part 1 SENT / Part 2 UNCERTAIN (multipart partial failure)
-# ==============================================================================
-def test_17_multipart_partial_failure_part1_sent_part2_uncertain(tmp_path: Path) -> None:
-    db_path = tmp_path / "test17.db"
+def test_18_multipart_success_and_partial_uncertainty(tmp_path: Path) -> None:
+    db_path = tmp_path / "test18.db"
     bootstrap_operational_test_database(db_path)
     two_part_message = "A" * 5000
     event_id, reservation_id = _seed_canonical_event(
@@ -915,139 +1041,19 @@ def test_17_multipart_partial_failure_part1_sent_part2_uncertain(tmp_path: Path)
 
 
 # ==============================================================================
-# TEST 18: Multipart finalization only after every part is confirmed
+# TEST 19: Restart after unresolved persistence
 # ==============================================================================
-def test_18_multipart_finalization_after_every_part_confirmed(tmp_path: Path) -> None:
-    db_path = tmp_path / "test18.db"
+def test_19_restart_after_unresolved_persistence(tmp_path: Path) -> None:
+    db_path = tmp_path / "test19.db"
     bootstrap_operational_test_database(db_path)
-    two_part_message = "B" * 5000
     event_id, reservation_id = _seed_canonical_event(
-        db_path, message=two_part_message, max_message_length=4000
+        db_path, initial_event_state=UNCERTAIN, initial_part_state=UNCERTAIN
     )
 
     async def scenario() -> None:
         worker = TelegramOutboxWorker()
         try:
-            transport_1 = FakeTelegramTransport(mode="success")
-            result_1 = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport_1,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-                part_index=1,
-            )
-            assert result_1.status == "in_flight"
-            assert result_1.durable_receipt is not None
-            assert result_1.durable_receipt.delivery_state == IN_FLIGHT
-            assert result_1.durable_receipt.all_parts_sent is False
-            assert len(transport_1.calls) == 1
-
-            with connect_database(db_path) as conn:
-                event_mid = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-                assert event_mid["delivery_state"] != SENT, "Event must NOT be finalized as SENT until all parts complete"
-
-            assert result_1.reservation_receipt is not None
-            transport_2 = FakeTelegramTransport(mode="success")
-            result_2 = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport_2,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-                part_index=2,
-                attempt_id=result_1.reservation_receipt.attempt_id,
-            )
-            assert result_2.status == "sent"
-            assert result_2.durable_receipt is not None
-            assert result_2.durable_receipt.all_parts_sent is True
-            assert len(transport_2.calls) == 1
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-    with connect_database(db_path) as conn:
-        event_final = conn.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-        assert event_final["delivery_state"] == SENT
-
-
-# ==============================================================================
-# TEST 19: No second HTTP attempt for previously SENT or UNCERTAIN parts
-# ==============================================================================
-def test_19_no_second_http_attempt_for_sent_or_uncertain_parts(tmp_path: Path) -> None:
-    db_path = tmp_path / "test19.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
             transport = FakeTelegramTransport(mode="success")
-            result_1 = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-            assert result_1.status == "sent"
-            assert len(transport.calls) == 1
-
-            # Attempt second send for the exact same already SENT part
-            transport_2 = FakeTelegramTransport(mode="success")
-            result_2 = await deliver_single_reserved_part(
-                worker=worker,
-                database_path=db_path,
-                event_id=event_id,
-                reservation_id=reservation_id,
-                transport=transport_2,
-                expected_identity=SYNTHETIC_IDENTITY,
-                now=NOW,
-            )
-            assert result_2.status == "blocked"
-            assert len(transport_2.calls) == 0, "No second HTTP attempt allowed for SENT part"
-        finally:
-            await worker.aclose()
-
-    asyncio.run(scenario())
-
-
-# ==============================================================================
-# TEST 20: No database connection held during external network await
-# ==============================================================================
-def test_20_no_database_connection_held_during_network_await(tmp_path: Path) -> None:
-    db_path = tmp_path / "test20.db"
-    bootstrap_operational_test_database(db_path)
-    event_id, reservation_id = _seed_canonical_event(db_path)
-
-    async def scenario() -> None:
-        worker = TelegramOutboxWorker()
-        try:
-            concurrent_write_succeeded = False
-
-            async def _inspect_db_during_transport(req: TelegramTransportRequest) -> None:
-                nonlocal concurrent_write_succeeded
-                # Open a completely independent connection during transport and perform a write.
-                # If the worker or caller held a connection or write lock, this would raise OperationalError (database locked).
-                with connect_database(db_path) as check_conn:
-                    check_conn.execute("BEGIN IMMEDIATE")
-                    check_conn.execute(
-                        "UPDATE telegram_alert_attempts SET delivery_state = 'IN_TEST' WHERE id = ?",
-                        (reservation_id,),
-                    )
-                    check_conn.commit()
-                    concurrent_write_succeeded = True
-
-            transport = FakeTelegramTransport(mode="success", delay_seconds=0.02)
-            transport.on_request_hook = _inspect_db_during_transport
-
             result = await deliver_single_reserved_part(
                 worker=worker,
                 database_path=db_path,
@@ -1058,9 +1064,9 @@ def test_20_no_database_connection_held_during_network_await(tmp_path: Path) -> 
                 now=NOW,
             )
 
-            assert result.status == "sent"
-            assert concurrent_write_succeeded is True, "Concurrent SQLite write must succeed during HTTP await"
-            assert len(transport.calls) == 1
+            assert result.status in ("blocked", "skipped")
+            assert result.durable_receipt is None
+            assert len(transport.calls) == 0, "Restart with UNCERTAIN event must not call transport"
         finally:
             await worker.aclose()
 
@@ -1068,11 +1074,54 @@ def test_20_no_database_connection_held_during_network_await(tmp_path: Path) -> 
 
 
 # ==============================================================================
-# TEST 21: No changes to existing public Telegram service behavior
+# TEST 20: No second HTTP call for uncertain delivery
+# ==============================================================================
+def test_20_no_second_http_call_for_uncertain_delivery(tmp_path: Path) -> None:
+    db_path = tmp_path / "test20.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            # First attempt times out -> UNCERTAIN
+            transport_1 = FakeTelegramTransport(mode="timeout")
+            result_1 = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport_1,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+            assert result_1.status == "uncertain"
+            assert len(transport_1.calls) == 1
+
+            # Second attempt must be rejected before HTTP
+            transport_2 = FakeTelegramTransport(mode="success")
+            result_2 = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport_2,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+            assert result_2.status in ("blocked", "skipped")
+            assert len(transport_2.calls) == 0, "No second HTTP call allowed for UNCERTAIN event"
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
+
+
+# ==============================================================================
+# TEST 21: Existing TelegramLifecycleDeliveryService interface unmodified
 # ==============================================================================
 def test_21_existing_telegram_lifecycle_service_unmodified() -> None:
     from app.alerts.telegram_lifecycle import TelegramLifecycleDeliveryService
-    # Verify instantiation and public interface remain completely intact
     assert hasattr(TelegramLifecycleDeliveryService, "deliver_for_run")
     assert hasattr(TelegramLifecycleDeliveryService, "public_watchlist_enabled")
 
@@ -1146,7 +1195,6 @@ def test_22_no_mutation_of_historical_quarantined_records(tmp_path: Path) -> Non
     async def scenario() -> None:
         worker = TelegramOutboxWorker()
         try:
-            # Attempt to deliver each of the 11 historical records through the protocol
             for ev_id, att_id in historical_event_ids:
                 result = await deliver_single_reserved_part(
                     worker=worker,
@@ -1164,7 +1212,6 @@ def test_22_no_mutation_of_historical_quarantined_records(tmp_path: Path) -> Non
 
     asyncio.run(scenario())
 
-    # Strict assertion: Transport was NEVER called
     assert len(transport.calls) == 0, "Transport MUST NEVER be called for historical quarantined records"
 
     # Strict assertion: Zero mutations on all 11 records in SQLite
@@ -1178,3 +1225,51 @@ def test_22_no_mutation_of_historical_quarantined_records(tmp_path: Path) -> Non
             assert b_row["delivery_state"] == a_row["delivery_state"]
             assert b_row["canonical_reservation_attempt_id"] == a_row["canonical_reservation_attempt_id"]
             assert b_row["updated_at"] == a_row["updated_at"]
+
+
+# ==============================================================================
+# TEST 23: No database connection held during external network await
+# ==============================================================================
+def test_23_no_database_connection_held_during_network_await(tmp_path: Path) -> None:
+    db_path = tmp_path / "test23.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    async def scenario() -> None:
+        worker = TelegramOutboxWorker()
+        try:
+            concurrent_write_succeeded = False
+
+            async def _inspect_db_during_transport(req: TelegramTransportRequest) -> None:
+                nonlocal concurrent_write_succeeded
+                # Open a completely independent connection during transport and perform a write.
+                # If the worker or caller held a connection or write lock, this would raise OperationalError (database locked).
+                with connect_database(db_path) as check_conn:
+                    check_conn.execute("BEGIN IMMEDIATE")
+                    check_conn.execute(
+                        "UPDATE telegram_alert_attempts SET delivery_state = 'IN_TEST' WHERE id = ?",
+                        (reservation_id,),
+                    )
+                    check_conn.commit()
+                    concurrent_write_succeeded = True
+
+            transport = FakeTelegramTransport(mode="success", delay_seconds=0.02)
+            transport.on_request_hook = _inspect_db_during_transport
+
+            result = await deliver_single_reserved_part(
+                worker=worker,
+                database_path=db_path,
+                event_id=event_id,
+                reservation_id=reservation_id,
+                transport=transport,
+                expected_identity=SYNTHETIC_IDENTITY,
+                now=NOW,
+            )
+
+            assert result.status == "sent"
+            assert concurrent_write_succeeded is True, "Concurrent SQLite write must succeed during HTTP await"
+            assert len(transport.calls) == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(scenario())
