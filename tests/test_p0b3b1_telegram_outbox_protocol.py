@@ -380,7 +380,7 @@ def test_03_cancellation_during_stage3_transaction(tmp_path: Path) -> None:
 
             def _on_request(req):
                 # When transport finishes, schedule a cancellation during Stage 3
-                asyncio.get_running_loop().call_later(0.01, lambda: delivery_task.cancel())
+                asyncio.get_running_loop().call_soon(lambda: delivery_task.cancel())
 
             transport = FakeTelegramTransport(mode="success", delay_seconds=0.01, on_response_hook=_on_request)
 
