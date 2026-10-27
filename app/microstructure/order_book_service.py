@@ -426,6 +426,7 @@ class OrderBookLiquidityService:
                 while not self._stop_event.is_set():
                     async with asyncio.timeout(self.receive_timeout_seconds):
                         payload = await connection.recv()
+                    self._recovery.note_receive()
                     accepted = self._handle_payload(payload)
                     if self._payload_failure:
                         raise UnverifiedPayloadError("public_stream_payload_unverified")

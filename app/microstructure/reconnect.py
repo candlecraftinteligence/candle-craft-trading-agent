@@ -26,6 +26,9 @@ class FeedRecovery:
         self.accepted_events = 0
         self.suppressed_logs = 0
         self.last_failure: dict[str, Any] | None = None
+        self.receive_count = 0
+        self.last_receive_at: float | None = None
+        self.heartbeat_timeout_count = 0
         self.start_session()
 
     def start_session(self) -> None:
@@ -46,6 +49,11 @@ class FeedRecovery:
         if not self._handshake_logged:
             self.logger.info("%s WebSocket connected; awaiting parsed market data.", self.feed)
             self._handshake_logged = True
+
+    def note_receive(self) -> None:
+        """A frame arrived. Parsing may still reject it; this is receive health only."""
+        self.receive_count += 1
+        self.last_receive_at = self.monotonic()
 
     def market_event(self) -> None:
         self.accepted_events += 1
@@ -69,6 +77,8 @@ class FeedRecovery:
         self.failures += 1
         self.state = "DISCONNECTED"
         self.last_failure = failure_facts(exc, phase)
+        if self.last_failure["category"] == "heartbeat_timeout":
+            self.heartbeat_timeout_count += 1
         if self.outage_started is None:
             self.outage_started = now
         nominal = min(self.maximum, self.base * 2 ** min(self.failures - 1, 10))
@@ -112,6 +122,12 @@ class FeedRecovery:
             "accepted_market_event_count": self.accepted_events,
             "suppressed_disconnect_logs": self.suppressed_logs,
             "last_failure": self.last_failure,
+            "receive_count": self.receive_count,
+            "last_receive_age_seconds": (
+                None if self.last_receive_at is None
+                else round(max(0.0, self.monotonic() - self.last_receive_at), 3)
+            ),
+            "heartbeat_timeout_count": self.heartbeat_timeout_count,
         }
 
 

@@ -93,6 +93,8 @@ from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa
 from app.alerts.provenance_diagnostics import summary_provenance, unavailable_provenance  # noqa: E402
 from app.watch_session import WatchSession, append_session_observation  # noqa: E402
 from app.core.phase_profile import PhaseProfile, current_observations, profiled  # noqa: E402
+from app.runtime.disk_isolation import SerializedDiskWorker  # noqa: E402
+from app.runtime.loop_lag import LoopLagMonitor  # noqa: E402
 from app.core.resource_observation import observe_local_resources  # noqa: E402
 from app.watch_retry_policy import watch_backoff_eligibility  # noqa: E402
 from app.formatters.scanner_console import ScannerConsolePresenter  # noqa: E402
@@ -2519,6 +2521,38 @@ def _stamp_runtime_watch_state(args: argparse.Namespace, state):
     return state
 
 
+def _reject_mismatched_watch_epoch(state: Any, expected: str) -> None:
+    """Re-check on the disk thread immediately before the atomic replace."""
+    if expected and getattr(state, "runtime_epoch_id", None) != expected:
+        raise WatchModeError(
+            "Operational watch state epoch does not match the active runtime epoch."
+        )
+
+
+async def _isolated_disk_call(
+    profile: PhaseProfile,
+    worker: SerializedDiskWorker,
+    phase: str,
+    fn: Any,
+    /,
+    *args: Any,
+    epoch_guard: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """Run one file operation off the loop without profiling it on the worker thread.
+
+    ``run_in_executor`` copies context vars. A profiled wrapper would mutate the
+    shared phase counters from that thread, so only the unwrapped function runs
+    there. Wall-clock time stays on the event-loop measurement.
+    """
+    target = getattr(fn, "__wrapped__", fn)
+
+    async def _run() -> Any:
+        return await worker.call(phase, target, *args, epoch_guard=epoch_guard, **kwargs)
+
+    return await profile.acall(phase, _run)
+
+
 @profiled("lifecycle")
 def _apply_lifecycle_if_enabled(
     args: argparse.Namespace,
@@ -3533,7 +3567,10 @@ async def _run_watch_mode(
     failure_streak = 0
     iteration_in_progress = False
     scheduled_start_monotonic = time.monotonic()
+    disk_worker = SerializedDiskWorker()
+    loop_lag = LoopLagMonitor(interval=0.5)
     try:
+        await loop_lag.start()
         if microstructure_flow_service is not None:
             await microstructure_flow_service.start(startup_queued_symbols)
         if order_book_liquidity_service is not None:
@@ -3551,6 +3588,9 @@ async def _run_watch_mode(
             prior_failure_streak = failure_streak
             iteration_in_progress = True
             profile = PhaseProfile()
+            profile.loop_lag = loop_lag
+            profile.disk_worker = disk_worker
+            loop_lag.bind(profile)
             profile.resources = profile.call("resource_observation", _observe_watch_resources)
             if session is not None:
                 profile.call("start_receipt", session.start_iteration,
@@ -3682,9 +3722,19 @@ async def _run_watch_mode(
                 )
 
             state = _stamp_runtime_watch_state(args, updated_state)
+            expected_epoch = _runtime_watch_epoch_id(args)
             try:
-                profile.call("watch_state_persistence", save_watch_state,
-                    WATCH_STATE_PATH, state, expected_updated_at=previous_state.updated_at
+                await _isolated_disk_call(
+                    profile,
+                    disk_worker,
+                    "watch_state_persistence",
+                    save_watch_state,
+                    WATCH_STATE_PATH,
+                    state,
+                    expected_updated_at=previous_state.updated_at,
+                    epoch_guard=lambda state=state, expected_epoch=expected_epoch: (
+                        _reject_mismatched_watch_epoch(state, expected_epoch)
+                    ),
                 )
             except WatchModeError as exc:
                 state = previous_state
@@ -3752,6 +3802,7 @@ async def _run_watch_mode(
             stored_manifest_run_id = execution.storage_run_id
             if args.store_scan:
                 try:
+                    # SQLite connection stays on this thread. P0B owns that isolation.
                     stored_manifest_run_id = profile.call("scan_storage", _store_watch_iteration_scan_run,
                         args,
                         execution=execution,
@@ -3814,7 +3865,11 @@ async def _run_watch_mode(
                 }
             )
             try:
-                manifest_row = profile.call("scan_manifest", _append_scan_run_manifest,
+                manifest_row = await _isolated_disk_call(
+                    profile,
+                    disk_worker,
+                    "scan_manifest",
+                    _append_scan_run_manifest,
                     execution.result,
                     watchlist=iteration_watchlist,
                     ranked_results=execution.ranked_results,
@@ -3868,9 +3923,16 @@ async def _run_watch_mode(
             presentation_summary = summary
             if args.watch_output_file is not None:
                 try:
-                    profile.call("watch_output", append_watch_output, args.watch_output_file, summary.model_copy(update={
-                        "phase_profile": profile.snapshot(boundary="before_watch_output_and_admin_report"),
-                    }))
+                    await _isolated_disk_call(
+                        profile,
+                        disk_worker,
+                        "watch_output",
+                        append_watch_output,
+                        args.watch_output_file,
+                        summary.model_copy(update={
+                            "phase_profile": profile.snapshot(boundary="before_watch_output_and_admin_report"),
+                        }),
+                    )
                 except OSError as exc:
                     phase_statuses["watch_output"] = "FAILED"
                     iteration_errors.append(_watch_phase_error("watch_output", exc))
@@ -3931,6 +3993,7 @@ async def _run_watch_mode(
             scheduled_start_monotonic = schedule.next_scheduled_monotonic
             await asyncio.sleep(max(0.0, scheduled_start_monotonic - time.monotonic()))
     except (KeyboardInterrupt, asyncio.CancelledError) as exc:
+        await disk_worker.settle_after_cancellation()
         if session is not None:
             session.shutdown_outcome = "CANCELLED"
         if iteration_in_progress:
@@ -3965,9 +4028,20 @@ async def _run_watch_mode(
     finally:
         # Attempt every cleanup even when an earlier service stop fails. The
         # enclosing session keeps its lease until all of these attempts finish.
+        # Disk shutdown is first so an in-flight replace finishes before sockets stop.
+        isolation_errors: list[BaseException] = []
+        try:
+            await disk_worker.aclose()
+        except Exception as exc:
+            isolation_errors.append(exc)
+        try:
+            await loop_lag.stop()
+        except Exception as exc:
+            isolation_errors.append(exc)
         services = (microstructure_flow_service, order_book_liquidity_service, liquidation_flow_service)
         cleanup_results = await asyncio.gather(*(service.stop() for service in services if service is not None), return_exceptions=True)
         cleanup_errors = [item for item in cleanup_results if isinstance(item, BaseException)]
+        cleanup_errors.extend(isolation_errors)
         if cleanup_errors:
             original = sys.exception()
             details = "; ".join(f"{type(item).__name__}: {item}" for item in cleanup_errors)
