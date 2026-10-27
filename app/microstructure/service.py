@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from app.context.models import ContextStatus
+from app.microstructure.reconnect import FeedRecovery, close_connection
+from app.microstructure.websocket_protocol import is_control_message as _is_control_message
+from app.microstructure.websocket_protocol import matches_usdt_perpetual, UnverifiedPayloadError
 from app.microstructure.agg_trade import (
     AggTradePayloadError,
     WrongContractTypeError,
@@ -55,13 +59,13 @@ class BinanceWebSocketTransport:
         ping_interval_seconds: float | None = None,
         ping_timeout_seconds: float | None = None,
     ) -> None:
-        if open_timeout_seconds <= 0 or close_timeout_seconds <= 0:
+        if not all(math.isfinite(v) and v > 0 for v in (open_timeout_seconds, close_timeout_seconds)):
             raise ValueError("WebSocket timeouts must be greater than zero")
         if max_queue < 1 or max_message_bytes < 1:
             raise ValueError("WebSocket queue and message limits must be positive")
-        if ping_interval_seconds is not None and ping_interval_seconds <= 0:
+        if ping_interval_seconds is not None and (not math.isfinite(ping_interval_seconds) or ping_interval_seconds <= 0):
             raise ValueError("WebSocket ping interval must be greater than zero")
-        if ping_timeout_seconds is not None and ping_timeout_seconds <= 0:
+        if ping_timeout_seconds is not None and (not math.isfinite(ping_timeout_seconds) or ping_timeout_seconds <= 0):
             raise ValueError("WebSocket ping timeout must be greater than zero")
         self.url = url
         self.open_timeout_seconds = float(open_timeout_seconds)
@@ -99,6 +103,8 @@ class MicrostructureFlowService:
         allow_legacy_missing_stream_type: bool = False,
         clock: Any | None = None,
         sleep: Any | None = None,
+        monotonic: Any | None = None,
+        jitter: Any | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         if stale_after_seconds <= 0:
@@ -107,7 +113,9 @@ class MicrostructureFlowService:
             raise ValueError("microstructure max_symbols must be between 1 and 1024")
         if reconnect_base_seconds < 0 or reconnect_max_seconds < reconnect_base_seconds:
             raise ValueError("microstructure reconnect delays are invalid")
-        self.transport = transport or BinanceWebSocketTransport()
+        self.transport = transport or BinanceWebSocketTransport(
+            ping_interval_seconds=20.0, ping_timeout_seconds=20.0,
+        )
         self.stale_after_seconds = float(stale_after_seconds)
         self.max_symbols = int(max_symbols)
         self.reconnect_base_seconds = float(reconnect_base_seconds)
@@ -116,6 +124,11 @@ class MicrostructureFlowService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.sleep = sleep or asyncio.sleep
         self.logger = log or logger
+        self._lifecycle_lock = asyncio.Lock()
+        self._recovery = FeedRecovery(
+            "Microstructure", self.reconnect_base_seconds, self.reconnect_max_seconds,
+            monotonic=monotonic, jitter=jitter, log=self.logger,
+        )
         self._aggregators: dict[str, SymbolFlowAggregator] = {}
         self._desired_symbols: set[str] = set()
         self._active_symbols: set[str] = set()
@@ -133,6 +146,7 @@ class MicrostructureFlowService:
         self._wrong_contract_event_count = 0
         self._ignored_message_count = 0
         self._last_error: str | None = None
+        self._payload_failure = False
 
     @property
     def running(self) -> bool:
@@ -143,30 +157,36 @@ class MicrostructureFlowService:
         return tuple(sorted(self._desired_symbols))
 
     async def start(self, symbols: Sequence[str] = ()) -> None:
-        await self.reconcile_symbols(symbols)
-        if self.running:
-            return
-        self._stop_event.clear()
-        self._task = asyncio.create_task(
-            self._run_forever(),
-            name="microstructure-flow-service",
-        )
+        async with self._lifecycle_lock:
+            await self.reconcile_symbols(symbols)
+            if self.running:
+                return
+            self._stop_event.clear()
+            self._task = asyncio.create_task(self._run_forever(), name="microstructure-flow-service")
 
     async def stop(self) -> None:
-        self._stop_event.set()
-        task = self._task
-        self._task = None
-        connection = self._connection
-        if connection is not None:
-            await _safe_close(connection)
-        if task is not None:
-            task.cancel()
+        async with self._lifecycle_lock:
+            self._stop_event.set()
+            task, connection = self._task, self._connection
+            self._invalidate_stream()
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                elif connection is not None:
+                    await close_connection(connection)
+            finally:
+                self._task = None
+                self._recovery.stopped()
+
+    def _invalidate_stream(self) -> None:
         self._connection = None
         self._active_symbols.clear()
+        for aggregator in self._aggregators.values():
+            aggregator.mark_disconnected(self.clock())
 
     async def reconcile_symbols(self, symbols: Sequence[str]) -> tuple[str, ...]:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
@@ -234,6 +254,7 @@ class MicrostructureFlowService:
 
     def health(self) -> dict[str, Any]:
         return {
+            **self._recovery.health(),
             "running": self.running,
             "connected": self._connection is not None,
             "desired_symbol_count": len(self._desired_symbols),
@@ -248,11 +269,15 @@ class MicrostructureFlowService:
         }
 
     async def _run_forever(self) -> None:
-        failure_count = 0
+        self._recovery.start_session()
         while not self._stop_event.is_set():
             connection: FlowWebSocketConnection | None = None
+            phase, delay = "connect", 0.0
+            self._payload_failure = False
             try:
                 connection = await self.transport.connect()
+                self._recovery.connected()
+                phase = "subscribe"
                 reconnect = self._ever_connected
                 self._ever_connected = True
                 self._connection_count += 1
@@ -261,54 +286,44 @@ class MicrostructureFlowService:
                 for aggregator in self._aggregators.values():
                     aggregator.mark_connected(now, reconnect=reconnect)
                 self._active_symbols.clear()
-                await self._send_subscription_diff(
-                    connection,
-                    additions=set(self._desired_symbols),
-                    removals=set(),
-                )
-                failure_count = 0
+                await self._send_subscription_diff(connection, additions=set(self._desired_symbols), removals=set())
                 self._last_error = None
-                self.logger.info(
-                    "Microstructure WebSocket connected symbols=%s reconnect=%s.",
-                    len(self._desired_symbols),
-                    reconnect,
-                )
+                phase = "receive"
                 while not self._stop_event.is_set():
                     payload = await connection.recv()
-                    self._handle_payload(payload)
+                    accepted = self._handle_payload(payload)
+                    if self._payload_failure:
+                        raise UnverifiedPayloadError("public_stream_payload_unverified")
+                    if accepted:
+                        self._recovery.market_event()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                failure_count += 1
                 self._disconnect_count += 1
                 self._last_error = f"{type(exc).__name__}:{_clean_reason(exc)}"
-                self.logger.warning(
-                    "Microstructure WebSocket disconnected attempt=%s error=%s.",
-                    failure_count,
-                    self._last_error,
-                )
+                self._invalidate_stream()
+                delay = self._recovery.failed(exc, phase)
             finally:
-                if self._connection is connection:
-                    self._connection = None
-                self._active_symbols.clear()
+                self._invalidate_stream()
                 if connection is not None:
-                    await _safe_close(connection)
-                now = self.clock()
-                for aggregator in self._aggregators.values():
-                    aggregator.mark_disconnected(now)
+                    await close_connection(connection)
             if self._stop_event.is_set():
                 break
-            delay = min(
-                self.reconnect_max_seconds,
-                self.reconnect_base_seconds * (2 ** min(max(failure_count - 1, 0), 10)),
-            )
             if delay > 0:
                 await self.sleep(delay)
+            else:
+                # A zero-delay injected test policy must still yield ownership.
+                await asyncio.sleep(0)
 
-    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> None:
+    def _reject_unverified_payload(self) -> None:
+        if self._connection is not None:
+            self._payload_failure = True
+            self._invalidate_stream()
+
+    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
         if _is_control_message(payload):
             self._ignored_message_count += 1
-            return
+            return False
         try:
             event = parse_binance_agg_trade(
                 payload,
@@ -316,15 +331,20 @@ class MicrostructureFlowService:
             )
         except WrongContractTypeError:
             self._wrong_contract_event_count += 1
-            return
+            return False
         except AggTradePayloadError:
             self._malformed_event_count += 1
-            return
+            self._reject_unverified_payload()
+            return False
+        if not matches_usdt_perpetual(event.symbol):
+            self._wrong_contract_event_count += 1
+            return False
         aggregator = self._aggregators.get(event.symbol)
         if aggregator is None or event.symbol not in self._desired_symbols:
             self._ignored_message_count += 1
-            return
-        aggregator.ingest(event)
+            return False
+        accepted = aggregator.ingest(event)
+        return accepted and 0 <= (self.clock() - event.event_time).total_seconds() <= self.stale_after_seconds
 
     async def _send_subscription_diff(
         self,
@@ -367,28 +387,6 @@ def _normalize_symbol(value: Any) -> str:
     if not normalized:
         raise ValueError("microstructure subscription symbol must not be blank")
     return normalized
-
-
-def _is_control_message(payload: str | bytes | Mapping[str, Any]) -> bool:
-    decoded: Any = payload
-    if isinstance(payload, bytes):
-        try:
-            decoded = payload.decode("utf-8")
-        except UnicodeDecodeError:
-            return False
-    if isinstance(decoded, str):
-        try:
-            decoded = json.loads(decoded)
-        except json.JSONDecodeError:
-            return False
-    return isinstance(decoded, Mapping) and "id" in decoded and "e" not in decoded and "data" not in decoded
-
-
-async def _safe_close(connection: FlowWebSocketConnection) -> None:
-    try:
-        await connection.close()
-    except Exception:
-        return
 
 
 def _clean_reason(exc: Exception) -> str:

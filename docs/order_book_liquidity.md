@@ -68,17 +68,30 @@ the 20-second ping interval and ping timeout. A 30-second application receive
 timeout reconnects a silent connection. These limits do not extend the existing
 five-second evidence freshness threshold.
 
-Abrupt TCP disconnects and handshake timeouts use exponential reconnect waits of
-1, 2, 4, 8, 16, then at most 30 seconds. Opening a socket does not reset that
+Abrupt TCP disconnects and handshake timeouts use exponential reconnect waits with
+20% bounded jitter: 0.8–1, 1.6–2, 3.2–4, 6.4–8, 12.8–16, then 24–30 seconds.
+Opening a socket does not reset that
 sequence: a subscribed USD-M depth event received after at least 60 seconds on
 the connection is required. Acknowledgements, malformed events and COIN-M events
 cannot reset it. Every disconnect immediately clears trusted book state before
 waiting for bootstrap cancellation or socket closure. Recovery still requires a
 new REST snapshot and the existing continuity checks.
 
-Warnings identify the failed phase and next retry delay. Service health exposes
+Disconnect records identify the failed phase, category, close codes and next retry
+delay without raw payloads or exception bodies. A first ordinary interruption is
+INFO; the third consecutive failure, 60-second outage, or a protocol/subscription/
+certificate failure escalates to WARNING. Repeats are summarized at most once per
+60 seconds per feed, and a sustained parsed-data recovery is INFO. Health counters
+retain every attempt and the suppressed-log count. A handshake is explicitly
+CONNECTED_UNVERIFIED; RECEIVING is transport progress, not book verification.
+Service health exposes
 the consecutive failure count, retry delay and connection time limits. These
 changes improve recovery; they cannot prevent network or exchange disconnects.
+
+Malformed connected-stream payloads revoke evidence before bounded reconnection.
+Non-target all-market contracts are excluded. Initial bridging additionally checks
+that both sides remain nonempty and uncrossed. Stop/start ownership is serialized;
+fresh synchronization and an owned REST client are available again after restart.
 
 ## Default load contract
 

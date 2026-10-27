@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -77,7 +78,8 @@ class _Transport:
 
 def _service(transport, **kwargs):
     service = OrderBookLiquidityService(
-        transport=transport, snapshot_client=_NoSnapshots(), clock=lambda: NOW, **kwargs,
+        transport=transport, snapshot_client=_NoSnapshots(), clock=lambda: NOW,
+        jitter=lambda bound: bound, **kwargs,
     )
     # Exercise the connection owner with real books, without starting REST workers.
     service._schedule_bootstrap = lambda symbol: None
@@ -156,6 +158,7 @@ def test_only_sustained_subscribed_usdm_depth_resets_failure_backoff(payload, ex
 
 
 def test_silent_connection_times_out_and_reconnects_without_external_traffic(caplog):
+    caplog.set_level(logging.INFO)
     async def scenario():
         connection = _Connection()
         delays = []
