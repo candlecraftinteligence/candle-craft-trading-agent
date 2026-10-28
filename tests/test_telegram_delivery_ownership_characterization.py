@@ -1,7 +1,7 @@
-"""B0 observations of existing behavior, including blockers; no production fixes.
+"""B0 observations, with the B0A terminalizer regression corrected explicitly.
 
 All databases are synthetic pytest temporaries. HTTP uses MockTransport only.
-These assertions describe the audited baseline, not the desired future contract.
+Other assertions still describe the audited baseline, not future integration.
 """
 
 from __future__ import annotations
@@ -265,7 +265,7 @@ def test_protocol_connections_close_on_worker_before_mock_http(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("completed", [False, True], ids=["active-claim", "confirmed-sent"])
-def test_no_send_terminalizer_currently_overwrites_active_or_completed_event(tmp_path, completed):
+def test_b0a_no_send_terminalizer_preserves_active_or_completed_event(tmp_path, completed):
     path = tmp_path / "terminalizer.db"
     event_id, reservation_id = seed(path)
     receipt = protocol.stage_1_outbox_preparation(
@@ -280,11 +280,13 @@ def test_no_send_terminalizer_currently_overwrites_active_or_completed_event(tmp
         )
     with connect_database(path) as connection:
         outbox = SQLitePublicTelegramOutbox(connection)
-        outbox.mark_terminal_without_send(
+        changed = outbox.mark_terminal_without_send(
             event_id=event_id, reservation_id=reservation_id, state=POLICY_DISABLED, reason="synthetic-stale-preflight",
         )
         event = connection.execute("SELECT delivery_state FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
-        assert event[0] == POLICY_DISABLED
+        # B0 overwrote this event with POLICY_DISABLED. B0A must reject it.
+        assert changed is False
+        assert event[0] == (SENT if completed else IN_FLIGHT)
         assert list_outbox_parts(connection, event_id=event_id)[0].delivery_state == (SENT if completed else IN_FLIGHT)
         # No HTTP in this test: synthetic success demonstrates state overwrite only.
 
