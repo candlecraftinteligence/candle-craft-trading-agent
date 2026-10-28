@@ -1,0 +1,524 @@
+{
+  "baseline_sha": "a5ffec2e7446ed6ec274fa8fb6482b4bcb9c24ce",
+  "pr160_sha": "248f2f5e9d55e3ad7b82a0f7e3b897269b54f5ce",
+  "python": "3.11.9",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "test": "tests/test_watch_session.py::test_completion_scope_and_nonrecursive_prior_observation_are_bounded",
+  "conditions": "Alternating fresh subprocesses; same interpreter, four DEV safety flags and same-length labels under common NTFS synthetic parent; 20 sessions attempted per trial; 45s subprocess cap.",
+  "original_actor": "Unverified. Restart Manager returned no owners at eight instrumented failure instants; positive-control known held reader returned Python. Filter inventory denied; no security settings changed.",
+  "matched": [
+    {
+      "label": "base00",
+      "trial": 1,
+      "code": 0,
+      "seconds": 4.266,
+      "winerror5": false
+    },
+    {
+      "label": "pr0160",
+      "trial": 1,
+      "code": 0,
+      "seconds": 3.171,
+      "winerror5": false
+    },
+    {
+      "label": "base00",
+      "trial": 2,
+      "code": 1,
+      "seconds": 3.594,
+      "winerror5": true
+    },
+    {
+      "label": "pr0160",
+      "trial": 2,
+      "code": 0,
+      "seconds": 3.391,
+      "winerror5": false
+    },
+    {
+      "label": "base00",
+      "trial": 3,
+      "code": 0,
+      "seconds": 3.156,
+      "winerror5": false
+    },
+    {
+      "label": "pr0160",
+      "trial": 3,
+      "code": 0,
+      "seconds": 2.844,
+      "winerror5": false
+    },
+    {
+      "label": "base00",
+      "trial": 4,
+      "code": 0,
+      "seconds": 3.109,
+      "winerror5": false
+    },
+    {
+      "label": "pr0160",
+      "trial": 4,
+      "code": 0,
+      "seconds": 3.485,
+      "winerror5": false
+    },
+    {
+      "label": "base00",
+      "trial": 5,
+      "code": 1,
+      "seconds": 3.75,
+      "winerror5": true
+    },
+    {
+      "label": "pr0160",
+      "trial": 5,
+      "code": 0,
+      "seconds": 3.562,
+      "winerror5": false
+    },
+    {
+      "label": "base00",
+      "trial": 6,
+      "code": 1,
+      "seconds": 3.75,
+      "winerror5": true
+    },
+    {
+      "label": "pr0160",
+      "trial": 6,
+      "code": 0,
+      "seconds": 3.672,
+      "winerror5": false
+    },
+    {
+      "label": "base00",
+      "trial": 7,
+      "code": 0,
+      "seconds": 3.5,
+      "winerror5": false
+    },
+    {
+      "label": "pr0160",
+      "trial": 7,
+      "code": 1,
+      "seconds": 3.641,
+      "winerror5": true
+    },
+    {
+      "label": "base00",
+      "trial": 8,
+      "code": 0,
+      "seconds": 3.281,
+      "winerror5": false
+    },
+    {
+      "label": "pr0160",
+      "trial": 8,
+      "code": 0,
+      "seconds": 3.578,
+      "winerror5": false
+    },
+    {
+      "label": "base00",
+      "trial": 9,
+      "code": 1,
+      "seconds": 3.781,
+      "winerror5": true
+    },
+    {
+      "label": "pr0160",
+      "trial": 9,
+      "code": 1,
+      "seconds": 3.719,
+      "winerror5": true
+    },
+    {
+      "label": "base00",
+      "trial": 10,
+      "code": 1,
+      "seconds": 4.375,
+      "winerror5": true
+    },
+    {
+      "label": "pr0160",
+      "trial": 10,
+      "code": 1,
+      "seconds": 3.437,
+      "winerror5": true
+    },
+    {
+      "label": "base00",
+      "trial": 11,
+      "code": 0,
+      "seconds": 3.547,
+      "winerror5": false
+    },
+    {
+      "label": "pr0160",
+      "trial": 11,
+      "code": 1,
+      "seconds": 3.781,
+      "winerror5": true
+    },
+    {
+      "label": "base00",
+      "trial": 12,
+      "code": 1,
+      "seconds": 3.969,
+      "winerror5": true
+    },
+    {
+      "label": "pr0160",
+      "trial": 12,
+      "code": 0,
+      "seconds": 3.516,
+      "winerror5": false
+    }
+  ],
+  "rm": [
+    {
+      "label": "base00",
+      "trial": 1,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "pr0160",
+      "trial": 1,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "base00",
+      "trial": 2,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "pr0160",
+      "trial": 2,
+      "code": 1,
+      "evidence": [
+        "RECEIPT_FAILURE_DIAGNOSTIC {\"pid\": 16176, \"winerror\": 5, \"destination\": \"C:\\\\CandleCraftDev\\\\.pytest_tmp\\\\receipt-diagnostics\\\\instrumented\\\\pr0160\\\\trial-02\\\\test_completion_scope_and_nonr0\\\\runtime.db.watch-session.json\", \"source_exists\": true, \"dest_exists\": true, \"rm_start\": 0, \"rm_result\": 0, \"needed\": 0, \"owners\": []}"
+      ]
+    },
+    {
+      "label": "base00",
+      "trial": 3,
+      "code": 1,
+      "evidence": [
+        "RECEIPT_FAILURE_DIAGNOSTIC {\"pid\": 2148, \"winerror\": 5, \"destination\": \"C:\\\\CandleCraftDev\\\\.pytest_tmp\\\\receipt-diagnostics\\\\instrumented\\\\base00\\\\trial-03\\\\test_completion_scope_and_nonr0\\\\runtime.db.watch-session.json\", \"source_exists\": true, \"dest_exists\": true, \"rm_start\": 0, \"rm_result\": 0, \"needed\": 0, \"owners\": []}"
+      ]
+    },
+    {
+      "label": "pr0160",
+      "trial": 3,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "base00",
+      "trial": 4,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "pr0160",
+      "trial": 4,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "base00",
+      "trial": 5,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "pr0160",
+      "trial": 5,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "base00",
+      "trial": 6,
+      "code": 1,
+      "evidence": [
+        "RECEIPT_FAILURE_DIAGNOSTIC {\"pid\": 11676, \"winerror\": 5, \"destination\": \"C:\\\\CandleCraftDev\\\\.pytest_tmp\\\\receipt-diagnostics\\\\instrumented\\\\base00\\\\trial-06\\\\test_completion_scope_and_nonr0\\\\runtime.db.watch-session.json\", \"source_exists\": true, \"dest_exists\": true, \"rm_start\": 0, \"rm_result\": 0, \"needed\": 0, \"owners\": []}"
+      ]
+    },
+    {
+      "label": "pr0160",
+      "trial": 6,
+      "code": 1,
+      "evidence": [
+        "RECEIPT_FAILURE_DIAGNOSTIC {\"pid\": 436, \"winerror\": 5, \"destination\": \"C:\\\\CandleCraftDev\\\\.pytest_tmp\\\\receipt-diagnostics\\\\instrumented\\\\pr0160\\\\trial-06\\\\test_completion_scope_and_nonr0\\\\runtime.db.watch-session.json\", \"source_exists\": true, \"dest_exists\": true, \"rm_start\": 0, \"rm_result\": 0, \"needed\": 0, \"owners\": []}"
+      ]
+    },
+    {
+      "label": "base00",
+      "trial": 7,
+      "code": 1,
+      "evidence": [
+        "RECEIPT_FAILURE_DIAGNOSTIC {\"pid\": 11964, \"winerror\": 5, \"destination\": \"C:\\\\CandleCraftDev\\\\.pytest_tmp\\\\receipt-diagnostics\\\\instrumented\\\\base00\\\\trial-07\\\\test_completion_scope_and_nonr0\\\\runtime.db.watch-session.json\", \"source_exists\": true, \"dest_exists\": true, \"rm_start\": 0, \"rm_result\": 0, \"needed\": 0, \"owners\": []}"
+      ]
+    },
+    {
+      "label": "pr0160",
+      "trial": 7,
+      "code": 1,
+      "evidence": [
+        "RECEIPT_FAILURE_DIAGNOSTIC {\"pid\": 12752, \"winerror\": 5, \"destination\": \"C:\\\\CandleCraftDev\\\\.pytest_tmp\\\\receipt-diagnostics\\\\instrumented\\\\pr0160\\\\trial-07\\\\test_completion_scope_and_nonr0\\\\runtime.db.watch-session.json\", \"source_exists\": true, \"dest_exists\": true, \"rm_start\": 0, \"rm_result\": 0, \"needed\": 0, \"owners\": []}"
+      ]
+    },
+    {
+      "label": "base00",
+      "trial": 8,
+      "code": 1,
+      "evidence": [
+        "RECEIPT_FAILURE_DIAGNOSTIC {\"pid\": 6176, \"winerror\": 5, \"destination\": \"C:\\\\CandleCraftDev\\\\.pytest_tmp\\\\receipt-diagnostics\\\\instrumented\\\\base00\\\\trial-08\\\\test_completion_scope_and_nonr0\\\\runtime.db.watch-session.json\", \"source_exists\": true, \"dest_exists\": true, \"rm_start\": 0, \"rm_result\": 0, \"needed\": 0, \"owners\": []}"
+      ]
+    },
+    {
+      "label": "pr0160",
+      "trial": 8,
+      "code": 1,
+      "evidence": [
+        "RECEIPT_FAILURE_DIAGNOSTIC {\"pid\": 3000, \"winerror\": 5, \"destination\": \"C:\\\\CandleCraftDev\\\\.pytest_tmp\\\\receipt-diagnostics\\\\instrumented\\\\pr0160\\\\trial-08\\\\test_completion_scope_and_nonr0\\\\runtime.db.watch-session.json\", \"source_exists\": true, \"dest_exists\": true, \"rm_start\": 0, \"rm_result\": 0, \"needed\": 0, \"owners\": []}"
+      ]
+    }
+  ],
+  "transient": [
+    {
+      "label": "base00",
+      "trial": 1,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "pr0160",
+      "trial": 1,
+      "code": 0,
+      "evidence": [
+        "TRANSIENT_REPLACE {\"failures\": [5], \"attempts\": 2, \"elapsed\": 0.0}"
+      ]
+    },
+    {
+      "label": "base00",
+      "trial": 2,
+      "code": 0,
+      "evidence": [
+        "TRANSIENT_REPLACE {\"failures\": [5], \"attempts\": 2, \"elapsed\": 0.01600000006146729}"
+      ]
+    },
+    {
+      "label": "pr0160",
+      "trial": 2,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "base00",
+      "trial": 3,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "pr0160",
+      "trial": 3,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "base00",
+      "trial": 4,
+      "code": 0,
+      "evidence": [
+        "TRANSIENT_REPLACE {\"failures\": [5], \"attempts\": 2, \"elapsed\": 0.0}"
+      ]
+    },
+    {
+      "label": "pr0160",
+      "trial": 4,
+      "code": 0,
+      "evidence": [
+        "TRANSIENT_REPLACE {\"failures\": [5], \"attempts\": 2, \"elapsed\": 0.015000000013969839}",
+        "TRANSIENT_REPLACE {\"failures\": [5], \"attempts\": 2, \"elapsed\": 0.015999999945051968}",
+        "TRANSIENT_REPLACE {\"failures\": [5], \"attempts\": 2, \"elapsed\": 0.0}",
+        "TRANSIENT_REPLACE {\"failures\": [5], \"attempts\": 2, \"elapsed\": 0.015999999945051968}"
+      ]
+    },
+    {
+      "label": "base00",
+      "trial": 5,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "pr0160",
+      "trial": 5,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "base00",
+      "trial": 6,
+      "code": 0,
+      "evidence": []
+    },
+    {
+      "label": "pr0160",
+      "trial": 6,
+      "code": 0,
+      "evidence": []
+    }
+  ],
+  "fixed": [
+    {
+      "label": "fix000",
+      "trial": 1,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 1,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 2,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 2,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 3,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 3,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 4,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 4,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 5,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 5,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 6,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 6,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 7,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 7,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 8,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 8,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 9,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 9,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 10,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 10,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 11,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 11,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix000",
+      "trial": 12,
+      "code": 0,
+      "winerror5": false
+    },
+    {
+      "label": "fix160",
+      "trial": 12,
+      "code": 0,
+      "winerror5": false
+    }
+  ]
+}
