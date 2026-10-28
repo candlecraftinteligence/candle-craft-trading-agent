@@ -10,8 +10,11 @@ the adapter in production, approve a deployment, or replace existing orchestrati
 - Starting main: `ad07a97866e087df7754f0eac58f7b9cca9deb13`.
 - Verification: `git fetch origin main` followed by matching `FETCH_HEAD` and
   `origin/main` to that exact SHA. Local `main` was stale and was not moved.
-- Implementation commit: `6c3f58243075c9c4abe67f5874e44c9839513c2e`
-  (adapter and all 150 new tests; subsequent handoff-only commit does not change code).
+- Initial implementation commit: `6c3f58243075c9c4abe67f5874e44c9839513c2e`
+  (adapter and the initial 150 new tests).
+- Final code commit: `5e99ce1f4b420d1d2ff829ece7e7b8ced0cda41f`
+  (oversized retry-delay guard and the 151st adapter case). The subsequent
+  handoff-only commit does not change code.
 - The final PR-head SHA and its GitHub Actions run/job evidence are recorded in
   the PR description and delivery report. They are not embedded recursively in
   their own commit. Compare that SHA with `git rev-parse HEAD` when reviewing.
@@ -119,9 +122,10 @@ Existing DEV environment: `.venv\Scripts\python.exe`, Python 3.11.9.
 
 | Verification | Result |
 | --- | --- |
-| Adapter-only collection | 150 cases across 23 test functions; no wrapper re-execution of existing scenarios |
-| Focused adapter + P0B3B1 + sender + routing run | 219 passed in 30.81s; zero failures/skips |
-| Full repository pytest | 4,115 passed, 1 warning in 786.98s (13:06); zero failures/skips |
+| Adapter cases in final focused collection | 151 cases across 23 test functions; no wrapper re-execution of existing scenarios |
+| Final focused adapter + P0B3B1 + sender + routing run | 220 passed in 30.63s; zero failures/skips |
+| Local full repository pytest, before the final overflow guard | 4,115 passed, 1 warning in 786.98s (13:06); zero failures/skips |
+| Full repository pytest on final PR head | GitHub Actions result recorded in the PR verification evidence; must be green for the exact final head |
 | Python compilation (`app scripts src tests`) | Passed, exit code 0 |
 | Dependency verification (`python -m pip check`) | Passed: `No broken requirements found.` |
 | `git diff --cached --check` | Passed |
@@ -129,10 +133,10 @@ Existing DEV environment: `.venv\Scripts\python.exe`, Python 3.11.9.
 Focused command:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_telegram_sender_adapter.py tests/test_p0b3b1_telegram_outbox_protocol.py tests/test_telegram_sender_phase42.py tests/test_telegram_signal_channel_routing.py --basetemp=.pytest_tmp/p0b3b2a-focused-final
+.\.venv\Scripts\python.exe -m pytest tests/test_telegram_sender_adapter.py tests/test_p0b3b1_telegram_outbox_protocol.py tests/test_telegram_sender_phase42.py tests/test_telegram_signal_channel_routing.py --basetemp=.pytest_tmp/p0b3b2a-hardened-focused
 ```
 
-Final full-suite command (approved outside the sandbox):
+Local full-suite command (approved outside the sandbox):
 
 ```powershell
 $env:LOCAL_MANUAL_MODE='true'
@@ -147,9 +151,19 @@ about its httpx integration. It is unrelated to the adapter; no dependencies wer
 changed to suppress it. Full repository coverage includes the unchanged P0A,
 P0B1, P0B2, P0B3B1, epoch, canonical identity, delivery and risk-warning suites.
 
-Its counts are 150 new adapter cases, 52 existing P0B3B1 tests, 11 sender tests,
+The final focused counts are 151 new adapter cases, 52 existing P0B3B1 tests, 11 sender tests,
 and 6 routing tests. Existing P0B3B1 accounting includes its documented shared
 wrappers; these are not presented as new independent adapter scenarios.
+
+The local full run and the first GitHub run passed before final review identified
+an oversized-integer retry-delay edge. `math.isfinite(10**400)` raises
+`OverflowError`; the surrounding protocol already classified such an exception
+as uncertain, but the standalone translator now handles it directly and returns
+`UNCERTAIN`. The added regression is case 151. The final 220-test focused run and
+compilation cover the updated code. The final full repository run is performed
+again by the existing GitHub CI workflow, with its exact-head outcome and test
+total recorded in [PR #158](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/158).
+The earlier 4,115-test local run is not presented as a final-code local rerun.
 
 Every new HTTP integration uses `httpx.MockTransport` against
 `https://telegram.invalid` with synthetic data and asserts actual HTTP handler
