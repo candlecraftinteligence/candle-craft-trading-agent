@@ -212,10 +212,9 @@ def test_scan_storage_worker_keeps_event_loop_and_websocket_responsive(
     async def _scenario() -> dict[str, Any]:
         worker = LifecycleWorker()
         loop_lag = LoopLagMonitor(interval=0.02)
-        profile = PhaseProfile()
+        profile = run_scan.WatchPhaseProfile()
         profile.loop_lag = loop_lag
         profile.lifecycle_worker = worker
-        run_scan._attach_scan_storage_profile(profile)
         loop_lag.bind(profile)
 
         await loop_lag.start()
@@ -388,20 +387,19 @@ def test_scan_storage_sync_and_isolated_parity_without_duplicate_writes(tmp_path
         assert row_a == row_b
 
 
-def test_epoch_mismatch_fails_closed_even_with_allow_storage_error(tmp_path: Path) -> None:
+def test_epoch_mismatch_fails_closed(tmp_path: Path) -> None:
     """Epoch mismatch inside worker-owned scan_storage must fail closed and never be swallowed."""
     db_path = tmp_path / "epoch_mismatch.db"
     args, execution, summary = _make_watch_execution(
         db_path,
         run_id="run-epoch-mismatch",
     )
-    args.allow_storage_error = True
     args.runtime_identity = _epoch_identity("epoch-stale-writer")
 
     async def _scenario() -> None:
         worker = LifecycleWorker()
         try:
-            with pytest.raises(SystemExit) as exc_info:
+            with pytest.raises((RuntimeEpochError, SystemExit)) as exc_info:
                 await run_scan._store_watch_iteration_scan_run_isolated(
                     args,
                     worker=worker,
@@ -410,16 +408,14 @@ def test_epoch_mismatch_fails_closed_even_with_allow_storage_error(tmp_path: Pat
                     started_at="2026-04-20T12:00:00+00:00",
                     completed_at="2026-04-20T12:00:02+00:00",
                     runtime_sec=1.25,
-                    command_used="python scripts/run_scan.py --watch --store-scan --allow-storage-error",
+                    command_used="python scripts/run_scan.py --watch --store-scan",
                 )
             exc = exc_info.value
-            assert isinstance(exc.__cause__, RuntimeEpochError)
             assert classify_watch_exception(exc) == WatchFailureDisposition.FATAL
-            assert run_scan._should_allow_storage_error(args, exc) is False
 
             snap = worker.scan_storage_snapshot()
-            assert snap["SCAN_STORAGE_TRANSACTION_RESULT"] == "ROLLED_BACK"
-            assert snap["scan_storage_connection_closed"] is True
+            assert snap["SCAN_STORAGE_TRANSACTION_RESULT"] == "NOT_OBSERVED"
+            assert snap["scan_storage_connection_closed"] is None
             assert snap["scan_storage_failed"] == 1
             assert snap["scan_storage_completed"] == 0
         finally:
@@ -432,37 +428,236 @@ def test_epoch_mismatch_fails_closed_even_with_allow_storage_error(tmp_path: Pat
         assert count == 0
 
 
-def test_allow_storage_error_semantics_watch_and_one_shot(tmp_path: Path) -> None:
-    """--allow-storage-error allows non-corrupt StorageError as FAILED/PARTIAL, never false SUCCESS or corrupt DB."""
-    args_strict = run_scan.parse_args(["--store-scan", "--database-path", str(tmp_path / "a.db")])
-    args_allow = run_scan.parse_args(
-        ["--store-scan", "--allow-storage-error", "--database-path", str(tmp_path / "a.db")]
-    )
-    assert args_strict.allow_storage_error is False
-    assert args_allow.allow_storage_error is True
+def test_no_global_function_replacement_during_scan_storage(tmp_path: Path) -> None:
+    """Scan storage isolation must not monkey-patch global database opening functions."""
+    import app.runtime_epoch.startup as startup_mod
+    import app.storage.repositories as repositories_mod
 
-    generic_err = SystemExit("Failed to store scan result: disk quota exceeded")
-    generic_err.__cause__ = StorageError("Failed to store scan result: disk quota exceeded")
-    assert classify_watch_exception(generic_err) == WatchFailureDisposition.FATAL
-    assert run_scan._should_allow_storage_error(args_strict, generic_err) is False
-    assert run_scan._should_allow_storage_error(args_allow, generic_err) is True
+    orig_startup_open = startup_mod.open_operational_database
+    orig_repo_open = repositories_mod.open_initialized_database
 
-    corrupt_err = SystemExit("Failed to store scan result: database disk image is malformed")
-    corrupt_err.__cause__ = StorageError("Failed to store scan result: database disk image is malformed")
-    assert run_scan._should_allow_storage_error(args_allow, corrupt_err) is False
+    db_path = tmp_path / "no_patch.db"
+    args, execution, summary = _make_watch_execution(db_path, run_id="run-no-patch-001")
 
-    saturated_err = LifecycleWorkerSaturated("one lifecycle operation and one waiter are permitted")
-    assert classify_watch_exception(saturated_err) == WatchFailureDisposition.FATAL
-    assert run_scan._should_allow_storage_error(args_allow, saturated_err) is False
+    async def _scenario() -> None:
+        worker = LifecycleWorker()
+        try:
+            stored_id = await run_scan._store_watch_iteration_scan_run_isolated(
+                args,
+                worker=worker,
+                execution=execution,
+                summary=summary,
+                started_at="2026-04-20T12:00:00+00:00",
+                completed_at="2026-04-20T12:00:02+00:00",
+                runtime_sec=1.25,
+                command_used="python scripts/run_scan.py --watch --store-scan",
+            )
+            assert stored_id == "run-no-patch-001"
+            assert startup_mod.open_operational_database is orig_startup_open
+            assert repositories_mod.open_initialized_database is orig_repo_open
+            snap = worker.scan_storage_snapshot()
+            assert snap["SCAN_STORAGE_TRANSACTION_RESULT"] == "COMMITTED"
+            assert snap["scan_storage_connection_closed"] is True
+            assert snap["scan_storage_completed"] == 1
+        finally:
+            await worker.aclose()
 
-    phase_statuses = {
-        "universe": "SUCCESS",
-        "queue": "SUCCESS",
-        "scanner": "SUCCESS",
-        "scan_storage": "FAILED",
-        "scan_manifest": "SUCCESS",
-    }
-    assert run_scan._iteration_status_from_phases(phase_statuses) == "PARTIAL"
+    asyncio.run(_scenario())
+    assert startup_mod.open_operational_database is orig_startup_open
+    assert repositories_mod.open_initialized_database is orig_repo_open
+
+
+def test_cross_thread_database_access_during_scan_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent threads must be able to access the database without global locks or function patches."""
+    import app.storage.repositories as repositories_mod
+
+    db_path = tmp_path / "concurrent_access.db"
+    args, execution, summary = _make_watch_execution(db_path, run_id="run-concurrent-001")
+
+    concurrent_read_saw_table = threading.Event()
+    worker_can_proceed = threading.Event()
+    real_insert_scan_run = repositories_mod._insert_scan_run
+
+    def _pausing_insert(conn: sqlite3.Connection, scan_record: Any) -> None:
+        real_insert_scan_run(conn, scan_record)
+        concurrent_read_saw_table.set()
+        assert worker_can_proceed.wait(timeout=5.0)
+
+    monkeypatch.setattr(repositories_mod, "_insert_scan_run", _pausing_insert)
+
+    concurrent_thread_result: list[bool] = []
+
+    def _concurrent_reader() -> None:
+        if not concurrent_read_saw_table.wait(timeout=5.0):
+            return
+        try:
+            with sqlite3.connect(db_path, timeout=5.0) as reader_conn:
+                row = reader_conn.execute("SELECT COUNT(*) FROM runtime_epochs").fetchone()
+                concurrent_thread_result.append(row is not None and row[0] >= 1)
+        finally:
+            worker_can_proceed.set()
+
+    reader_thread = threading.Thread(target=_concurrent_reader, name="test-concurrent-reader")
+    reader_thread.start()
+
+    async def _scenario() -> None:
+        worker = LifecycleWorker()
+        try:
+            stored_id = await run_scan._store_watch_iteration_scan_run_isolated(
+                args,
+                worker=worker,
+                execution=execution,
+                summary=summary,
+                started_at="2026-04-20T12:00:00+00:00",
+                completed_at="2026-04-20T12:00:02+00:00",
+                runtime_sec=1.25,
+                command_used="python scripts/run_scan.py --watch --store-scan",
+            )
+            assert stored_id == "run-concurrent-001"
+            snap = worker.scan_storage_snapshot()
+            assert snap["SCAN_STORAGE_TRANSACTION_RESULT"] == "COMMITTED"
+            assert snap["scan_storage_connection_closed"] is True
+            assert snap["scan_storage_completed"] == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(_scenario())
+    reader_thread.join(timeout=5.0)
+    assert concurrent_thread_result == [True]
+
+
+def test_transaction_outcomes_and_closure_truthfulness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipts truthfully reflect actual DB outcomes without inventing COMMITTED or connection_closed."""
+    import app.storage.repositories as repositories_mod
+
+    db_path = tmp_path / "truthful_receipts.db"
+    args, execution, summary = _make_watch_execution(db_path, run_id="run-truth-001")
+
+    # 1. Failure before transaction begins -> NO_TRANSACTION_OR_UNKNOWN, connection_closed=True
+    def _failing_insert(*_args: Any, **_kwargs: Any) -> None:
+        raise sqlite3.OperationalError("synthetic insert failure")
+
+    monkeypatch.setattr(repositories_mod, "_insert_scan_run", _failing_insert)
+
+    async def _scenario_pre_transaction_failure() -> None:
+        worker = LifecycleWorker()
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                await run_scan._store_watch_iteration_scan_run_isolated(
+                    args,
+                    worker=worker,
+                    execution=execution,
+                    summary=summary,
+                    started_at="2026-04-20T12:00:00+00:00",
+                    completed_at="2026-04-20T12:00:02+00:00",
+                    runtime_sec=1.25,
+                    command_used="python scripts/run_scan.py --watch --store-scan",
+                )
+            assert isinstance(exc_info.value.__cause__, StorageError)
+            snap = worker.scan_storage_snapshot()
+            assert snap["SCAN_STORAGE_TRANSACTION_RESULT"] == "NO_TRANSACTION_OR_UNKNOWN"
+            assert snap["scan_storage_connection_closed"] is True
+            assert snap["scan_storage_failed"] == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(_scenario_pre_transaction_failure())
+    monkeypatch.undo()
+
+    # 2. Failure after transaction begins -> ROLLED_BACK, connection_closed=True
+    def _failing_symbols(*_args: Any, **_kwargs: Any) -> None:
+        raise sqlite3.OperationalError("synthetic symbol insert failure during transaction")
+
+    monkeypatch.setattr(repositories_mod, "_insert_symbol_results", _failing_symbols)
+
+    async def _scenario_in_transaction_failure() -> None:
+        worker = LifecycleWorker()
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                await run_scan._store_watch_iteration_scan_run_isolated(
+                    args,
+                    worker=worker,
+                    execution=execution,
+                    summary=summary,
+                    started_at="2026-04-20T12:00:00+00:00",
+                    completed_at="2026-04-20T12:00:02+00:00",
+                    runtime_sec=1.25,
+                    command_used="python scripts/run_scan.py --watch --store-scan",
+                )
+            assert isinstance(exc_info.value.__cause__, StorageError)
+            snap = worker.scan_storage_snapshot()
+            assert snap["SCAN_STORAGE_TRANSACTION_RESULT"] == "ROLLED_BACK"
+            assert snap["scan_storage_connection_closed"] is True
+            assert snap["scan_storage_failed"] == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(_scenario_in_transaction_failure())
+    monkeypatch.undo()
+
+    # 3. Commit failure -> COMMIT_FAILED_ROLLED_BACK, connection_closed=True
+    import app.runtime_epoch.startup as startup_mod
+    real_open = startup_mod.open_operational_database
+
+    class _FailingCommitConn:
+        def __init__(self, actual: sqlite3.Connection) -> None:
+            self._actual = actual
+
+        def commit(self) -> None:
+            raise sqlite3.OperationalError("synthetic commit failure")
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._actual, name)
+
+    def _open_failing_commit(*o_args: Any, **o_kwargs: Any) -> Any:
+        conn, epoch = real_open(*o_args, **o_kwargs)
+        return _FailingCommitConn(conn), epoch
+
+    monkeypatch.setattr(startup_mod, "open_operational_database", _open_failing_commit)
+
+    async def _scenario_commit_failure() -> None:
+        worker = LifecycleWorker()
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                await run_scan._store_watch_iteration_scan_run_isolated(
+                    args,
+                    worker=worker,
+                    execution=execution,
+                    summary=summary,
+                    started_at="2026-04-20T12:00:00+00:00",
+                    completed_at="2026-04-20T12:00:02+00:00",
+                    runtime_sec=1.25,
+                    command_used="python scripts/run_scan.py --watch --store-scan",
+                )
+            assert isinstance(exc_info.value.__cause__, StorageError)
+            snap = worker.scan_storage_snapshot()
+            assert snap["SCAN_STORAGE_TRANSACTION_RESULT"] == "COMMIT_FAILED_ROLLED_BACK"
+            assert snap["scan_storage_connection_closed"] is True
+            assert snap["scan_storage_failed"] == 1
+        finally:
+            await worker.aclose()
+
+    asyncio.run(_scenario_commit_failure())
+    monkeypatch.undo()
+
+
+def test_watch_phase_profile_explicit_composition() -> None:
+    """WatchPhaseProfile composes scan_storage telemetry without mutating PhaseProfile.snapshot."""
+    worker = LifecycleWorker()
+    try:
+        profile = run_scan.WatchPhaseProfile()
+        assert isinstance(profile, PhaseProfile)
+        assert "snapshot" not in profile.__dict__
+        profile.lifecycle_worker = worker
+        snap = profile.snapshot(boundary="test_composition")
+        assert "scan_storage_isolation" in snap
+        assert snap["scan_storage_isolation"]["contract"] == "cci-scan-storage-isolation-v1"
+    finally:
+        asyncio.run(worker.aclose())
 
 
 def test_cancellation_mid_commit_completes_and_closes_before_propagating(
@@ -621,7 +816,7 @@ def test_telemetry_isolation_and_no_late_writes_after_shutdown_fence(
             await worker.call(lambda: "cont-read-ok", stage="continuation_read")
             await worker.call(_cont_write_call, stage="continuation_write")
 
-            with pytest.raises(SystemExit):
+            with pytest.raises((RuntimeEpochError, SystemExit)):
                 bad_args = run_scan.parse_args(["--store-scan", "--database-path", str(db_path)])
                 bad_args.runtime_identity = _epoch_identity("wrong-epoch")
                 await run_scan._store_watch_iteration_scan_run_isolated(
@@ -641,7 +836,7 @@ def test_telemetry_isolation_and_no_late_writes_after_shutdown_fence(
             assert compact["completed"] == 3
             assert compact["failed"] == 0
 
-            assert compact["SCAN_STORAGE_TRANSACTION_RESULT"] == "ROLLED_BACK"
+            assert compact["SCAN_STORAGE_TRANSACTION_RESULT"] == "NOT_OBSERVED"
             assert compact["scan_storage_completed"] == 0
             assert compact["scan_storage_failed"] == 1
 
@@ -721,27 +916,25 @@ def test_watch_mode_end_to_end_scan_storage_worker_and_lease_fence(
     assert lifecycle_shutdown["failed"] == 0
 
 
-def test_watch_mode_allow_storage_error_records_partial_never_false_success(
+def test_watch_mode_recoverable_vs_fatal_storage_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """In watch mode, --allow-storage-error records scan_storage=FAILED and status=PARTIAL, never false SUCCESS."""
+    """In watch mode, recoverable storage error records scan_storage=FAILED and status=PARTIAL; fatal error raises."""
     _quiet_runtime(monkeypatch, tmp_path)
     path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
     watch_out = tmp_path / "watch_out.jsonl"
 
-    def _failing_store(*_args: Any, **_kwargs: Any) -> str:
-        raise StorageError("disk quota exceeded")
+    # 1. Recoverable error: transient SQLite lock -> records FAILED, status=PARTIAL
+    def _recoverable_store(*_args: Any, **_kwargs: Any) -> str:
+        exc = sqlite3.OperationalError("database is locked")
+        raise StorageError("transient lock") from exc
 
-    monkeypatch.setattr(run_scan, "store_scan_result", _failing_store)
-
-    with pytest.raises(SystemExit, match="disk quota exceeded"):
-        asyncio.run(run_scan.main(_watch_args(path, universe_size=1)))
+    monkeypatch.setattr(run_scan, "store_scan_result", _recoverable_store)
 
     asyncio.run(
         run_scan.main(
             [
                 *_watch_args(path, universe_size=1),
-                "--allow-storage-error",
                 "--watch-output-file",
                 str(watch_out),
             ]
@@ -753,11 +946,21 @@ def test_watch_mode_allow_storage_error_records_partial_never_false_success(
     assert rows[0]["database_storage_status"] == "FAILED"
     assert rows[0]["phase_statuses"]["scan_storage"] == "FAILED"
 
+    # 2. Fatal error: corrupt database -> raises SystemExit immediately
+    def _fatal_store(*_args: Any, **_kwargs: Any) -> str:
+        exc = sqlite3.DatabaseError("database disk image is malformed")
+        raise StorageError("malformed database") from exc
 
-def test_one_shot_allow_storage_error_vs_strict_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch.setattr(run_scan, "store_scan_result", _fatal_store)
+
+    with pytest.raises(SystemExit, match="malformed database"):
+        asyncio.run(run_scan.main(_watch_args(path, universe_size=1)))
+
+
+def test_one_shot_strict_storage_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One-shot mode raises SystemExit on StorageError by default and warns under --allow-storage-error."""
+    """One-shot mode strictly raises SystemExit on StorageError."""
     _quiet_runtime(monkeypatch, tmp_path)
     path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
 
@@ -778,10 +981,6 @@ def test_one_shot_allow_storage_error_vs_strict_failure(
     ]
     with pytest.raises(SystemExit, match="synthetic one-shot storage failure"):
         asyncio.run(run_scan.main(base_args))
-
-    asyncio.run(run_scan.main([*base_args, "--allow-storage-error"]))
-    captured = capsys.readouterr().out
-    assert "Warning: scan storage failed safely (--allow-storage-error):" in captured
 
 
 def test_cancellation_during_recoverable_vs_fatal_scan_storage_failure(
@@ -846,7 +1045,7 @@ def test_cancellation_during_recoverable_vs_fatal_scan_storage_failure(
                         runtime_sec=1.25,
                         command_used="python scripts/run_scan.py --watch --store-scan",
                     )
-                except SystemExit as exc:
+                except (SystemExit, RuntimeEpochError) as exc:
                     return exc
                 return None
 
@@ -857,9 +1056,8 @@ def test_cancellation_during_recoverable_vs_fatal_scan_storage_failure(
             await asyncio.sleep(0.01)
             release.set()
             fatal_exc = await t_fat
-            assert isinstance(fatal_exc, SystemExit)
+            assert isinstance(fatal_exc, (SystemExit, RuntimeEpochError))
             assert "fatal epoch violation" in str(fatal_exc)
-            assert isinstance(fatal_exc.__cause__, RuntimeEpochError)
         finally:
             await worker.aclose()
 

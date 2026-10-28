@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 import concurrent.futures
-from contextlib import contextmanager
 from contextvars import copy_context
 from dataclasses import dataclass
 import queue
@@ -21,10 +20,7 @@ import time
 from typing import Any
 
 from app.core.phase_profile import suspend_phase_profile
-from app.lifecycle.transaction_receipt import (
-    note_repository_completion,
-    observe_transaction,
-)
+from app.lifecycle.transaction_receipt import observe_transaction
 from app.watch_supervisor import FatalWatchIterationError
 
 
@@ -66,120 +62,6 @@ def _contains_forbidden_db_object(value: Any, *, _depth: int = 0) -> bool:
     if isinstance(value, (tuple, list, set, frozenset)):
         return any(_contains_forbidden_db_object(item, _depth=_depth + 1) for item in value)
     return False
-
-
-class _ObservedScanStorageConnection:
-    """Worker-thread wrapper that records commit/rollback/close receipts for scan_storage."""
-
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self._connection = connection
-        self._committed = False
-        self._commit_failed = False
-        self._rolled_back = False
-        self._closed = False
-
-    def commit(self) -> None:
-        try:
-            self._connection.commit()
-        except BaseException:
-            self._commit_failed = True
-            try:
-                self._connection.rollback()
-            except sqlite3.Error:
-                pass
-            else:
-                self._rolled_back = True
-            raise
-        else:
-            self._committed = True
-
-    def rollback(self) -> None:
-        self._connection.rollback()
-        self._rolled_back = True
-
-    def close(self) -> None:
-        try:
-            if not self._committed and not self._rolled_back:
-                try:
-                    if getattr(self._connection, "in_transaction", False):
-                        self._connection.rollback()
-                        self._rolled_back = True
-                except sqlite3.Error:
-                    pass
-        finally:
-            try:
-                self._connection.close()
-                self._closed = True
-            finally:
-                note_repository_completion(
-                    committed=self._committed,
-                    commit_failed=self._commit_failed,
-                    rolled_back=self._rolled_back,
-                    closed=self._closed,
-                )
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._connection, name)
-
-
-@contextmanager
-def _observe_scan_storage_connection(*, enabled: bool):
-    if not enabled:
-        yield
-        return
-    import app.runtime_epoch.startup as startup_mod
-    import app.storage.repositories as repositories_mod
-
-    worker_ident = threading.get_ident()
-    orig_startup_open = startup_mod.open_operational_database
-    orig_repo_open = repositories_mod.open_initialized_database
-
-    def _wrapped_startup_open(*args: Any, **kwargs: Any) -> Any:
-        try:
-            opened = orig_startup_open(*args, **kwargs)
-        except BaseException:
-            if threading.get_ident() == worker_ident:
-                note_repository_completion(
-                    committed=False,
-                    commit_failed=False,
-                    rolled_back=True,
-                    closed=True,
-                )
-            raise
-        if threading.get_ident() == worker_ident:
-            if isinstance(opened, sqlite3.Connection):
-                return _ObservedScanStorageConnection(opened)
-            if (
-                isinstance(opened, tuple)
-                and len(opened) == 2
-                and isinstance(opened[0], sqlite3.Connection)
-            ):
-                return (_ObservedScanStorageConnection(opened[0]), opened[1])
-        return opened
-
-    def _wrapped_repo_open(*args: Any, **kwargs: Any) -> Any:
-        try:
-            conn = orig_repo_open(*args, **kwargs)
-        except BaseException:
-            if threading.get_ident() == worker_ident:
-                note_repository_completion(
-                    committed=False,
-                    commit_failed=False,
-                    rolled_back=True,
-                    closed=True,
-                )
-            raise
-        if threading.get_ident() == worker_ident and isinstance(conn, sqlite3.Connection):
-            return _ObservedScanStorageConnection(conn)
-        return conn
-
-    startup_mod.open_operational_database = _wrapped_startup_open
-    repositories_mod.open_initialized_database = _wrapped_repo_open
-    try:
-        yield
-    finally:
-        startup_mod.open_operational_database = orig_startup_open
-        repositories_mod.open_initialized_database = orig_repo_open
 
 
 @dataclass(frozen=True)
@@ -423,11 +305,7 @@ class LifecycleWorker:
         started = time.perf_counter()
         value = None
         error = None
-        with (
-            suspend_phase_profile(),
-            observe_transaction() as transaction,
-            _observe_scan_storage_connection(enabled=(stage == "scan_storage")),
-        ):
+        with suspend_phase_profile(), observe_transaction() as transaction:
             try:
                 value = fn(*args, **kwargs)
                 if _contains_forbidden_db_object(value):

@@ -19,6 +19,7 @@ from app.analytics.symbol_health import symbol_health_events_from_results, updat
 from app.backtesting import ReplaySummary
 from app.data.dtos import NA
 from app.formatters.scanner_display import RankedSymbolDisplay, display_fields
+from app.lifecycle.transaction_receipt import note_repository_completion
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 from app.storage.database import (
     DEFAULT_DATABASE_PATH,
@@ -101,6 +102,11 @@ def store_scan_result(
     )
     replay_records = tuple(_replay_result_records(run_id, replay_summary, result.market_regime.state.value))
 
+    connection: sqlite3.Connection | None = None
+    committed = False
+    commit_failed = False
+    rolled_back = False
+    closed = False
     try:
         if expected_identity is not None:
             from app.runtime_epoch.startup import open_operational_database
@@ -109,18 +115,49 @@ def store_scan_result(
                 database_path,
                 expected_identity=expected_identity,
             )
-            closer = connection
         else:
-            closer = open_initialized_database(database_path)
-        with closing(closer) as connection:
-            _insert_scan_run(connection, scan_record)
-            _insert_symbol_results(connection, symbol_records)
-            _insert_setup_candidates(connection, setup_records)
-            _insert_replay_results(connection, replay_records)
-            _store_symbol_health(connection, result, timestamp=timestamp)
+            connection = open_initialized_database(database_path)
+
+        _insert_scan_run(connection, scan_record)
+        _insert_symbol_results(connection, symbol_records)
+        _insert_setup_candidates(connection, setup_records)
+        _insert_replay_results(connection, replay_records)
+        _store_symbol_health(connection, result, timestamp=timestamp)
+        try:
             connection.commit()
+            committed = True
+        except BaseException:
+            commit_failed = True
+            try:
+                if connection.in_transaction:
+                    connection.rollback()
+                    rolled_back = True
+            except sqlite3.Error:
+                pass
+            raise
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to store scan run in database: {database_path}") from exc
+    finally:
+        if connection is not None:
+            try:
+                if not committed and not rolled_back:
+                    try:
+                        if connection.in_transaction:
+                            connection.rollback()
+                            rolled_back = True
+                    except sqlite3.Error:
+                        pass
+            finally:
+                try:
+                    connection.close()
+                    closed = True
+                finally:
+                    note_repository_completion(
+                        committed=committed,
+                        commit_failed=commit_failed,
+                        rolled_back=rolled_back,
+                        closed=closed,
+                    )
     return run_id
 
 

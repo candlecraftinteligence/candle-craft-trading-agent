@@ -468,7 +468,7 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--disable-performance-memory": "performance_memory",
         "--reset-performance-memory": "reset_performance_memory",
         "--min-memory-confidence": "min_memory_confidence",
-        "--store-scan": "store_scan", "--allow-storage-error": "allow_storage_error",
+        "--store-scan": "store_scan",
         "--database-path": "database_path",
         "--telegram-manual-signals": "telegram_manual_signals",
         "--telegram-signals": "telegram_manual_signals",
@@ -649,7 +649,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--save-run", nargs="?", const=Path("scan_runs/latest_scan.json"), type=Path)
     parser.add_argument("--store-scan", action="store_true")
-    parser.add_argument("--allow-storage-error", dest="allow_storage_error", action="store_true", default=False)
     parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
     parser.add_argument("--runtime-epoch-id", dest="runtime_epoch_id")
     parser.add_argument("--runtime-epoch-cutoff-at", dest="runtime_epoch_cutoff_at")
@@ -1199,15 +1198,11 @@ async def _main(
                 inline_raw_payload=_scan_raw_payload_inline_only(),
                 expected_identity=getattr(args, "runtime_identity", None),
             )
-        except (StorageError, RuntimeEpochError) as exc:
-            if _should_allow_storage_error(args, exc):
-                print(f"Warning: scan storage failed safely (--allow-storage-error): {exc}")
-            else:
-                raise SystemExit(str(exc)) from exc
-        else:
-            print(f"Stored scan run: {stored_scan_run_id}")
-            print(f"Database: {args.database_path}")
-            print("")
+        except StorageError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Stored scan run: {stored_scan_run_id}")
+        print(f"Database: {args.database_path}")
+        print("")
     manifest_row = _append_scan_run_manifest(
         result,
         watchlist=watchlist,
@@ -3663,10 +3658,10 @@ async def _run_watch_mode(
             prior_failure_streak = failure_streak
             iteration_in_progress = True
             profile = PhaseProfile()
+            profile.__class__ = WatchPhaseProfile
             profile.loop_lag = loop_lag
             profile.disk_worker = disk_worker
             profile.lifecycle_worker = lifecycle_worker
-            _attach_scan_storage_profile(profile)
             loop_lag.bind(profile)
             profile.resources = profile.call("resource_observation", _observe_watch_resources)
             if session is not None:
@@ -3910,8 +3905,8 @@ async def _run_watch_mode(
                         runtime_sec=runtime_sec,
                         command_used=command_used,
                     )
-                except (OSError, StorageError, RuntimeEpochError, SystemExit) as exc:
-                    if classify_watch_exception(exc) == WatchFailureDisposition.FATAL and not _should_allow_storage_error(args, exc):
+                except (OSError, StorageError, SystemExit) as exc:
+                    if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
                         raise
                     phase_statuses["scan_storage"] = "FAILED"
                     iteration_errors.append(_watch_phase_error("scan_storage", exc))
@@ -4780,60 +4775,22 @@ async def _run_watch_scan_iteration(
     )
 
 
-def _should_allow_storage_error(args: argparse.Namespace, exc: BaseException) -> bool:
-    if not bool(getattr(args, "allow_storage_error", False)):
-        return False
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    saw_storage_error = isinstance(exc, (StorageError, OSError))
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(
-            current,
-            (
-                RuntimeEpochError,
-                UnsupportedSchemaVersionError,
-                FatalWatchIterationError,
-            ),
-        ):
-            return False
-        if isinstance(current, (StorageError, OSError)):
-            saw_storage_error = True
-        message = str(current).lower()
-        if any(
-            token in message
-            for token in (
-                "corrupt",
-                "malformed",
-                "not a database",
-                "runtime epoch",
-                "epoch mismatch",
-                "unsupported schema",
-            )
-        ):
-            return False
-        current = current.__cause__ or current.__context__
-    return saw_storage_error
+class WatchPhaseProfile(PhaseProfile):
+    """Watch-mode phase profile composing loop-lag, disk, lifecycle, and scan_storage telemetry."""
 
-
-def _attach_scan_storage_profile(profile: PhaseProfile) -> None:
-    base_snapshot = profile.snapshot
-
-    def _snapshot(*, boundary: str) -> dict[str, Any]:
-        report = base_snapshot(boundary=boundary)
-        worker = profile.lifecycle_worker
+    def snapshot(self, *, boundary: str) -> dict[str, Any]:
+        report = super().snapshot(boundary=boundary)
+        worker = self.lifecycle_worker
         if worker is not None and hasattr(worker, "scan_storage_snapshot"):
             scan_storage_iso = dict(worker.scan_storage_snapshot())
             scan_storage_iso["LOOP_LAG_DURING_SCAN_STORAGE"] = (
-                profile.loop_lag.compact_snapshot()["phase_sampled_lag_seconds_max"].get("scan_storage", NA)
-                if profile.loop_lag is not None
+                self.loop_lag.compact_snapshot()["phase_sampled_lag_seconds_max"].get("scan_storage", NA)
+                if self.loop_lag is not None
                 else NA
             )
             scan_storage_iso["IN_FLIGHT_AT_SHUTDOWN"] = worker.compact_snapshot().get("IN_FLIGHT_AT_SHUTDOWN", 0)
             report["scan_storage_isolation"] = scan_storage_iso
         return report
-
-    profile.snapshot = _snapshot  # type: ignore[method-assign]
 
 
 async def _store_watch_iteration_scan_run_isolated(
@@ -4877,12 +4834,8 @@ async def _store_watch_iteration_scan_run_isolated(
             del exc._cci_lifecycle_interruption
         else:
             interruption = None
-        if (
-            (interruption is not None or (task is not None and task.cancelling()))
-            and (
-                classify_watch_exception(exc) == WatchFailureDisposition.RECOVERABLE
-                or _should_allow_storage_error(args, exc)
-            )
+        if (interruption is not None or (task is not None and task.cancelling())) and (
+            classify_watch_exception(exc) != WatchFailureDisposition.FATAL
         ):
             raise (interruption if interruption is not None else asyncio.CancelledError()) from exc
         raise
