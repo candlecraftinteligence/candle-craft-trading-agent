@@ -12,6 +12,7 @@ import json
 import os
 import math
 import re
+import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,10 +27,37 @@ MAX_RECEIPT_BYTES = 32768
 MAX_HEADER_BYTES = 256
 MAX_JOURNAL_BYTES = 32 * 1024 * 1024
 JOURNAL_TERMINAL_RESERVE_BYTES = 256
+_WINDOWS_REPLACE_RETRY = os.name == "nt"
+_REPLACE_RETRY_DELAYS = (0.01, 0.02, 0.04, 0.08)
+_REPLACE_RETRY_BUDGET_SECONDS = 0.25
 
 
 class WatchSessionError(FatalWatchIterationError):
     pass
+
+
+def _replace_receipt(temporary: Path, receipt: Path) -> None:
+    """Retry only Windows access/sharing failures of the same atomic rename.
+
+    The caller keeps its lease and the already-fsynced temporary file. Both
+    attempt count and retry admission time are bounded; an OS call itself is
+    synchronous and cannot be given a hard completion deadline here.
+    """
+    deadline = time.monotonic() + _REPLACE_RETRY_BUDGET_SECONDS
+    for attempt in range(len(_REPLACE_RETRY_DELAYS) + 1):
+        try:
+            os.replace(temporary, receipt)
+            return
+        except PermissionError as exc:
+            if (not _WINDOWS_REPLACE_RETRY or getattr(exc, "winerror", None) not in {5, 32}
+                    or attempt == len(_REPLACE_RETRY_DELAYS)):
+                raise
+            delay = _REPLACE_RETRY_DELAYS[attempt]
+            if time.monotonic() + delay >= deadline:
+                raise
+            time.sleep(delay)
+            if time.monotonic() >= deadline:
+                raise
 
 
 def _utc_now() -> str:
@@ -328,7 +356,7 @@ class WatchSession:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.receipt_path)
+            _replace_receipt(temporary, self.receipt_path)
         except BaseException as exc:
             original = exc
             raise
