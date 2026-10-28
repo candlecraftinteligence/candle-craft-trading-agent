@@ -92,7 +92,7 @@ from app.alerts.telegram_lifecycle import (  # noqa: E402
 from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa: E402
 from app.alerts.provenance_diagnostics import summary_provenance, unavailable_provenance  # noqa: E402
 from app.watch_session import WatchSession, append_session_observation  # noqa: E402
-from app.core.phase_profile import PhaseProfile, current_observations, profiled  # noqa: E402
+from app.core.phase_profile import PhaseProfile, current_observations, profiled, suspend_phase_profile  # noqa: E402
 from app.runtime.disk_isolation import SerializedDiskWorker  # noqa: E402
 from app.runtime.loop_lag import LoopLagMonitor  # noqa: E402
 from app.runtime.lifecycle_isolation import LifecycleWorker  # noqa: E402
@@ -225,7 +225,7 @@ from app.watch_iteration import (  # noqa: E402
     watch_phase_error as _watch_phase_error,
 )
 from app.watch_supervisor import (  # noqa: E402
-    WatchFailureDisposition,
+    FatalWatchIterationError, WatchFailureDisposition,
     WatchIterationStatus,
     classify_watch_exception,
     failure_backoff_seconds,
@@ -468,7 +468,7 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--disable-performance-memory": "performance_memory",
         "--reset-performance-memory": "reset_performance_memory",
         "--min-memory-confidence": "min_memory_confidence",
-        "--store-scan": "store_scan",
+        "--store-scan": "store_scan", "--allow-storage-error": "allow_storage_error",
         "--database-path": "database_path",
         "--telegram-manual-signals": "telegram_manual_signals",
         "--telegram-signals": "telegram_manual_signals",
@@ -649,6 +649,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--save-run", nargs="?", const=Path("scan_runs/latest_scan.json"), type=Path)
     parser.add_argument("--store-scan", action="store_true")
+    parser.add_argument("--allow-storage-error", dest="allow_storage_error", action="store_true", default=False)
     parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
     parser.add_argument("--runtime-epoch-id", dest="runtime_epoch_id")
     parser.add_argument("--runtime-epoch-cutoff-at", dest="runtime_epoch_cutoff_at")
@@ -1198,11 +1199,15 @@ async def _main(
                 inline_raw_payload=_scan_raw_payload_inline_only(),
                 expected_identity=getattr(args, "runtime_identity", None),
             )
-        except StorageError as exc:
-            raise SystemExit(str(exc)) from exc
-        print(f"Stored scan run: {stored_scan_run_id}")
-        print(f"Database: {args.database_path}")
-        print("")
+        except (StorageError, RuntimeEpochError) as exc:
+            if _should_allow_storage_error(args, exc):
+                print(f"Warning: scan storage failed safely (--allow-storage-error): {exc}")
+            else:
+                raise SystemExit(str(exc)) from exc
+        else:
+            print(f"Stored scan run: {stored_scan_run_id}")
+            print(f"Database: {args.database_path}")
+            print("")
     manifest_row = _append_scan_run_manifest(
         result,
         watchlist=watchlist,
@@ -2362,7 +2367,7 @@ def _handle_history_command(args: argparse.Namespace) -> None:
             print(f"Exported scan history: {args.export_history_json}")
         if args.show_history:
             print(format_history_table(history))
-    except StorageError as exc:
+    except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
 
 
@@ -2390,7 +2395,7 @@ def _handle_research_command(args: argparse.Namespace) -> None:
     except ResearchDatabaseMissing as exc:
         print(str(exc))
         return
-    except StorageError as exc:
+    except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
 
     if args.research_output_json is not None:
@@ -3352,7 +3357,7 @@ def _apply_symbol_health_if_enabled(
             enabled=symbol_priority_plan.enabled or args.show_symbol_health,
             expected_identity=getattr(args, "runtime_identity", None),
         )
-    except StorageError as exc:
+    except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
     return result.model_copy(update={"symbol_health": summary})
 
@@ -3661,6 +3666,7 @@ async def _run_watch_mode(
             profile.loop_lag = loop_lag
             profile.disk_worker = disk_worker
             profile.lifecycle_worker = lifecycle_worker
+            _attach_scan_storage_profile(profile)
             loop_lag.bind(profile)
             profile.resources = profile.call("resource_observation", _observe_watch_resources)
             if session is not None:
@@ -3874,8 +3880,25 @@ async def _run_watch_mode(
             stored_manifest_run_id = execution.storage_run_id
             if args.store_scan:
                 try:
-                    # SQLite connection stays on this thread. P0B owns that isolation.
-                    stored_manifest_run_id = profile.call("scan_storage", _store_watch_iteration_scan_run,
+                    if lifecycle_worker is not None:
+                        stored_manifest_run_id = await profile.acall(
+                            "scan_storage",
+                            _store_watch_iteration_scan_run_isolated,
+                            args,
+                            worker=lifecycle_worker,
+                            execution=execution,
+                            summary=summary.model_copy(update={
+                                "database_storage_status": "PENDING",
+                                "duration_scope": "through_watch_state_before_primary_scan_storage",
+                            }),
+                            started_at=iteration_started_at,
+                            completed_at=completed_at,
+                            runtime_sec=runtime_sec,
+                            command_used=command_used,
+                        )
+                    else:
+                        # SQLite connection stays on this thread when LifecycleWorker is absent.
+                        stored_manifest_run_id = profile.call("scan_storage", _store_watch_iteration_scan_run,
                         args,
                         execution=execution,
                         summary=summary.model_copy(update={
@@ -3887,8 +3910,8 @@ async def _run_watch_mode(
                         runtime_sec=runtime_sec,
                         command_used=command_used,
                     )
-                except (OSError, StorageError, SystemExit) as exc:
-                    if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
+                except (OSError, StorageError, RuntimeEpochError, SystemExit) as exc:
+                    if classify_watch_exception(exc) == WatchFailureDisposition.FATAL and not _should_allow_storage_error(args, exc):
                         raise
                     phase_statuses["scan_storage"] = "FAILED"
                     iteration_errors.append(_watch_phase_error("scan_storage", exc))
@@ -4113,6 +4136,7 @@ async def _run_watch_mode(
             if session is not None:
                 # WatchSession.__exit__ persists this under the still-held lease.
                 session.state["lifecycle_isolation_shutdown"] = lifecycle_worker.compact_snapshot()
+                session.state["scan_storage_isolation_shutdown"] = lifecycle_worker.scan_storage_snapshot()
         try:
             await disk_worker.aclose()
         except Exception as exc:
@@ -4756,6 +4780,114 @@ async def _run_watch_scan_iteration(
     )
 
 
+def _should_allow_storage_error(args: argparse.Namespace, exc: BaseException) -> bool:
+    if not bool(getattr(args, "allow_storage_error", False)):
+        return False
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    saw_storage_error = isinstance(exc, (StorageError, OSError))
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (
+                RuntimeEpochError,
+                UnsupportedSchemaVersionError,
+                FatalWatchIterationError,
+            ),
+        ):
+            return False
+        if isinstance(current, (StorageError, OSError)):
+            saw_storage_error = True
+        message = str(current).lower()
+        if any(
+            token in message
+            for token in (
+                "corrupt",
+                "malformed",
+                "not a database",
+                "runtime epoch",
+                "epoch mismatch",
+                "unsupported schema",
+            )
+        ):
+            return False
+        current = current.__cause__ or current.__context__
+    return saw_storage_error
+
+
+def _attach_scan_storage_profile(profile: PhaseProfile) -> None:
+    base_snapshot = profile.snapshot
+
+    def _snapshot(*, boundary: str) -> dict[str, Any]:
+        report = base_snapshot(boundary=boundary)
+        worker = profile.lifecycle_worker
+        if worker is not None and hasattr(worker, "scan_storage_snapshot"):
+            scan_storage_iso = dict(worker.scan_storage_snapshot())
+            scan_storage_iso["LOOP_LAG_DURING_SCAN_STORAGE"] = (
+                profile.loop_lag.compact_snapshot()["phase_sampled_lag_seconds_max"].get("scan_storage", NA)
+                if profile.loop_lag is not None
+                else NA
+            )
+            scan_storage_iso["IN_FLIGHT_AT_SHUTDOWN"] = worker.compact_snapshot().get("IN_FLIGHT_AT_SHUTDOWN", 0)
+            report["scan_storage_isolation"] = scan_storage_iso
+        return report
+
+    profile.snapshot = _snapshot  # type: ignore[method-assign]
+
+
+async def _store_watch_iteration_scan_run_isolated(
+    args: argparse.Namespace,
+    *,
+    worker: LifecycleWorker | None = None,
+    execution: WatchScanExecution,
+    summary: WatchIterationSummary,
+    started_at: str,
+    completed_at: str,
+    runtime_sec: float,
+    command_used: str,
+) -> str:
+    if worker is None:
+        with suspend_phase_profile():
+            return _store_watch_iteration_scan_run(
+                args,
+                execution=execution,
+                summary=summary,
+                started_at=started_at,
+                completed_at=completed_at,
+                runtime_sec=runtime_sec,
+                command_used=command_used,
+            )
+    try:
+        return await worker.call(
+            _store_watch_iteration_scan_run,
+            args,
+            stage="scan_storage",
+            execution=execution,
+            summary=summary,
+            started_at=started_at,
+            completed_at=completed_at,
+            runtime_sec=runtime_sec,
+            command_used=command_used,
+        )
+    except (Exception, SystemExit) as exc:
+        task = asyncio.current_task()
+        interruption = getattr(exc, "_cci_lifecycle_interruption", None)
+        if isinstance(interruption, (asyncio.CancelledError, KeyboardInterrupt)):
+            del exc._cci_lifecycle_interruption
+        else:
+            interruption = None
+        if (
+            (interruption is not None or (task is not None and task.cancelling()))
+            and (
+                classify_watch_exception(exc) == WatchFailureDisposition.RECOVERABLE
+                or _should_allow_storage_error(args, exc)
+            )
+        ):
+            raise (interruption if interruption is not None else asyncio.CancelledError()) from exc
+        raise
+
+
 @profiled("scan_storage")
 def _store_watch_iteration_scan_run(
     args: argparse.Namespace,
@@ -4816,7 +4948,7 @@ def _store_watch_iteration_scan_run(
             inline_raw_payload=_scan_raw_payload_inline_only(),
             expected_identity=getattr(args, "runtime_identity", None),
         )
-    except StorageError as exc:
+    except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
 
 
