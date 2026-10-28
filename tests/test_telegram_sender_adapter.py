@@ -158,7 +158,7 @@ def test_failure_evidence_controls_retry_eligibility(raw, expected):
     assert outcome.telegram_message_id is None
 
 
-@pytest.mark.parametrize("delay", [-1, True, "7", float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("delay", [-1, True, "7", float("nan"), float("inf"), -float("inf"), 10**400])
 def test_invalid_rate_limit_backoff_never_authorizes_retry(delay):
     raw = dict(status="failed", delivery_state=RETRYABLE, part_number=1, total_parts=1,
                http_status=429, rate_limited=True, retry_after=delay,

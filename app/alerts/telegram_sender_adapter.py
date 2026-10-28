@@ -157,7 +157,11 @@ def adapt_telegram_send_result(
         and raw.get("rate_limited") is True
     ):
         delay = raw.get("retry_after")
-        if delay is None or (type(delay) in (int, float) and math.isfinite(delay) and delay >= 0):
+        try:
+            valid_delay = delay is None or (type(delay) in (int, float) and math.isfinite(delay) and delay >= 0)
+        except OverflowError:
+            valid_delay = False
+        if valid_delay:
             return TelegramTransportOutcome(
                 delivery_state=RETRYABLE, http_status=429, rate_limited=True,
                 retry_after=delay, error_category=category, error=category,
