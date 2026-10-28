@@ -11,6 +11,7 @@ Zero live orders. Zero real Telegram HTTP calls. Zero production database access
 from __future__ import annotations
 
 import asyncio
+import multiprocessing as mp
 import sqlite3
 import threading
 import time
@@ -58,6 +59,8 @@ from tests.runtime_epoch_support import (
     SYNTHETIC_EPOCH_ID,
     SYNTHETIC_IDENTITY,
     bootstrap_operational_test_database,
+    grant_synthetic_origin,
+    seed_legacy_lifecycle,
 )
 
 NOW = "2026-07-16T10:00:00Z"
@@ -151,6 +154,24 @@ def _seed_canonical_event(
 ) -> tuple[int, int]:
     """Helper to seed an operational public alert event, attempt, and parts."""
     with open_initialized_database(db_path) as connection:
+        if runtime_epoch_id is not None:
+            origin = grant_synthetic_origin(connection, symbol="BTCUSDT", run_id="p0b3b1-seed-run", now=NOW)
+            seed_legacy_lifecycle(
+                connection,
+                lifecycle_id=signal_id,
+                symbol="BTCUSDT",
+                current_state="WATCHLISTED",
+                last_seen_at=NOW,
+            )
+            connection.execute(
+                """
+                UPDATE setup_lifecycle_records
+                SET runtime_epoch_id = ?, creation_origin_id = ?
+                WHERE lifecycle_id = ?
+                """,
+                (runtime_epoch_id, origin.origin_id, signal_id),
+            )
+
         cursor = connection.execute(
             """
             INSERT INTO public_alert_events (
@@ -1644,8 +1665,197 @@ def test_hardening_16_two_concurrent_claimants(tmp_path: Path) -> None:
     test_baseline_04_two_competing_claimants_atomic_claim_race(tmp_path)
 
 
+def _mp_claim_worker(
+    db_path_str: str,
+    event_id: int,
+    reservation_id: int,
+    owner_name: str,
+    barrier: Any,
+    queue: Any,
+    expected_identity: Any = SYNTHETIC_IDENTITY,
+) -> None:
+    """Worker executed in an independent OS process for cross-process claim races."""
+    try:
+        if barrier is not None:
+            barrier.wait(timeout=10.0)
+
+        receipt = stage_1_outbox_preparation(
+            db_path_str,
+            event_id=event_id,
+            reservation_id=reservation_id,
+            expected_identity=expected_identity,
+            now=NOW,
+            owner=owner_name,
+        )
+        queue.put({
+            "owner": owner_name,
+            "success": True,
+            "attempt_id": receipt.attempt_id,
+            "part_id": receipt.part_id,
+            "error_type": None,
+            "error_message": None,
+        })
+    except (OutboxClaimRejected, OutboxPreparationError) as exc:
+        queue.put({
+            "owner": owner_name,
+            "success": False,
+            "attempt_id": None,
+            "part_id": None,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        })
+    except RuntimeEpochError as exc:
+        queue.put({
+            "owner": owner_name,
+            "success": False,
+            "attempt_id": None,
+            "part_id": None,
+            "error_type": "RuntimeEpochError",
+            "error_message": str(exc),
+        })
+    except Exception as exc:
+        queue.put({
+            "owner": owner_name,
+            "success": False,
+            "attempt_id": None,
+            "part_id": None,
+            "error_type": f"UNEXPECTED:{type(exc).__name__}",
+            "error_message": str(exc),
+        })
+
+
 def test_hardening_17_independent_process_claim_ownership(tmp_path: Path) -> None:
-    test_baseline_05_multithreaded_claim_race(tmp_path)
+    """Cross-process proof: Two independent OS processes racing for atomic claim ownership.
+
+    Proves:
+    1. Only one process obtains a valid committed claim.
+    2. The competing process cannot obtain equivalent delivery authority.
+    3. The event/attempt ledger remains internally consistent.
+    4. No existing SENT or UNCERTAIN event becomes newly claimable.
+    5. All SQLite connections close in their owning process (exclusive write lock succeeds).
+    6. Runtime epoch and reservation checks remain enforced across processes.
+    """
+    ctx = mp.get_context("spawn")
+    db_path = tmp_path / "hard17_mp.db"
+    bootstrap_operational_test_database(db_path)
+    event_id, reservation_id = _seed_canonical_event(db_path)
+
+    barrier = ctx.Barrier(2)
+    queue = ctx.Queue()
+
+    p1 = ctx.Process(
+        target=_mp_claim_worker,
+        args=(str(db_path), event_id, reservation_id, "proc-alpha", barrier, queue),
+    )
+    p2 = ctx.Process(
+        target=_mp_claim_worker,
+        args=(str(db_path), event_id, reservation_id, "proc-beta", barrier, queue),
+    )
+
+    p1.start()
+    p2.start()
+
+    res1 = queue.get(timeout=15.0)
+    res2 = queue.get(timeout=15.0)
+
+    p1.join(timeout=5.0)
+    p2.join(timeout=5.0)
+
+    assert p1.exitcode == 0, f"Process 1 exited with {p1.exitcode}"
+    assert p2.exitcode == 0, f"Process 2 exited with {p2.exitcode}"
+
+    results = [res1, res2]
+    successes = [r for r in results if r["success"]]
+    failures = [r for r in results if not r["success"]]
+
+    # 1. Only one process obtains a valid committed claim
+    assert len(successes) == 1, f"Expected exactly 1 claim winner, got {len(successes)}"
+    winner = successes[0]
+    assert winner["attempt_id"] is not None
+    assert winner["part_id"] == 1
+
+    # 2. The competing process cannot obtain equivalent delivery authority
+    assert len(failures) == 1, f"Expected exactly 1 claim rejection, got {len(failures)}"
+    loser = failures[0]
+    assert loser["attempt_id"] is None
+    assert loser["error_type"] in ("OutboxClaimRejected", "OutboxPreparationError")
+
+    # 3. The event/attempt ledger remains internally consistent
+    with connect_database(db_path) as conn:
+        ev_row = conn.execute("SELECT * FROM public_alert_events WHERE id = ?", (event_id,)).fetchone()
+        assert ev_row["delivery_state"] == "IN_FLIGHT"
+        assert ev_row["attempt_id"] == winner["attempt_id"]
+        assert ev_row["canonical_reservation_attempt_id"] == reservation_id
+
+        part_row = conn.execute(
+            "SELECT * FROM public_alert_delivery_parts WHERE public_alert_event_id = ?", (event_id,)
+        ).fetchone()
+        assert part_row["delivery_state"] == "IN_FLIGHT"
+        assert part_row["attempt_id"] == winner["attempt_id"]
+
+        attempts = conn.execute(
+            "SELECT * FROM telegram_alert_attempts WHERE public_watchlist_plan_id = 'plan-p0b3b1'"
+        ).fetchall()
+        assert len(attempts) == 1, "No duplicate or orphaned attempt records created"
+
+    # 4. No existing SENT or UNCERTAIN event becomes newly claimable
+    # 4a. SENT event cannot be claimed by any process
+    with connect_database(db_path) as conn:
+        conn.execute("UPDATE public_alert_events SET delivery_state = 'SENT' WHERE id = ?", (event_id,))
+        conn.execute("UPDATE public_alert_delivery_parts SET delivery_state = 'SENT' WHERE public_alert_event_id = ?", (event_id,))
+        conn.commit()
+
+    q_sent = ctx.Queue()
+    p_sent1 = ctx.Process(target=_mp_claim_worker, args=(str(db_path), event_id, reservation_id, "proc-sent-1", None, q_sent))
+    p_sent2 = ctx.Process(target=_mp_claim_worker, args=(str(db_path), event_id, reservation_id, "proc-sent-2", None, q_sent))
+    p_sent1.start()
+    p_sent2.start()
+    r_sent1 = q_sent.get(timeout=10.0)
+    r_sent2 = q_sent.get(timeout=10.0)
+    p_sent1.join(timeout=5.0)
+    p_sent2.join(timeout=5.0)
+    assert p_sent1.exitcode == 0 and p_sent2.exitcode == 0
+    assert not r_sent1["success"] and not r_sent2["success"], "SENT event must not be claimable by any process"
+
+    # 4b. UNCERTAIN event cannot be claimed by any process
+    with connect_database(db_path) as conn:
+        conn.execute("UPDATE public_alert_events SET delivery_state = 'UNCERTAIN' WHERE id = ?", (event_id,))
+        conn.execute("UPDATE public_alert_delivery_parts SET delivery_state = 'UNCERTAIN' WHERE public_alert_event_id = ?", (event_id,))
+        conn.commit()
+
+    q_unc = ctx.Queue()
+    p_unc = ctx.Process(target=_mp_claim_worker, args=(str(db_path), event_id, reservation_id, "proc-unc", None, q_unc))
+    p_unc.start()
+    r_unc = q_unc.get(timeout=10.0)
+    p_unc.join(timeout=5.0)
+    assert p_unc.exitcode == 0
+    assert not r_unc["success"], "UNCERTAIN event must not be claimable by any process"
+
+    # 5. All SQLite connections close in their owning process (exclusive write lock succeeds)
+    with connect_database(db_path) as conn:
+        conn.execute("BEGIN EXCLUSIVE")
+        conn.execute("UPDATE public_alert_events SET delivery_state = 'VERIFIED_MP' WHERE id = ?", (event_id,))
+        conn.commit()
+
+    # 6. Runtime epoch and reservation checks remain enforced across processes
+    foreign_identity = RuntimeEpochIdentity(
+        epoch_id="foreign-epoch",
+        cutoff_at="2000-01-01T00:00:00Z",
+        contract_version=1,
+        reviewed_release_sha="eef92b89f168bbb016715f3486b9f6bf2824f53f",
+        generation_binding="foreign-binding",
+    )
+    q_epoch = ctx.Queue()
+    p_epoch = ctx.Process(
+        target=_mp_claim_worker,
+        args=(str(db_path), event_id, reservation_id, "proc-epoch", None, q_epoch, foreign_identity),
+    )
+    p_epoch.start()
+    r_epoch = q_epoch.get(timeout=10.0)
+    p_epoch.join(timeout=5.0)
+    assert p_epoch.exitcode == 0
+    assert not r_epoch["success"]
+    assert r_epoch["error_type"] == "RuntimeEpochError", f"Expected RuntimeEpochError, got {r_epoch}"
 
 
 def test_hardening_18_multipart_success_and_partial_uncertainty(tmp_path: Path) -> None:
