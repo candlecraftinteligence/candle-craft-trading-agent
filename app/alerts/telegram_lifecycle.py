@@ -3477,6 +3477,15 @@ async def _deliver_committed_public_alert_intent(
         raise StorageError("Unable to commit Telegram delivery intent before network activity.") from exc
 
     outbox = SQLitePublicTelegramOutbox(connection)
+    no_send_snapshot = connection.execute(
+        "SELECT delivery_state, attempt_id, attempt_count FROM public_alert_events WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+    no_send_authority = {
+        "expected_state": no_send_snapshot["delivery_state"] if no_send_snapshot else None,
+        "expected_attempt_id": no_send_snapshot["attempt_id"] if no_send_snapshot else None,
+        "expected_attempt_count": no_send_snapshot["attempt_count"] if no_send_snapshot else 0,
+    }
     preflight_guard = (
         PublicWatchlistSendGuard(
             event_key=reservation.event_key,
@@ -3493,6 +3502,7 @@ async def _deliver_committed_public_alert_intent(
             reservation_id=reservation_id,
             state=SKIPPED_DRY_RUN,
             reason="telegram_dry_run_enabled",
+            **no_send_authority,
         )
         return TelegramLifecycleDelivery(
             symbol=symbol,
@@ -3514,6 +3524,7 @@ async def _deliver_committed_public_alert_intent(
                 reservation_id=reservation_id,
                 state=terminal_state,
                 reason=_first_non_na(blocked.error_message, blocked.detail),
+                **no_send_authority,
             )
             return TelegramLifecycleDelivery(
                 symbol=symbol,
@@ -4281,6 +4292,9 @@ class TelegramLifecycleDeliveryService:
                     reservation_id=attempt.id,
                     state=FAILED_FINAL,
                     reason=PUBLIC_TRIGGERED_INTERNAL_ONLY_REASON,
+                    expected_state=row["delivery_state"],
+                    expected_attempt_id=row["attempt_id"],
+                    expected_attempt_count=row["attempt_count"],
                 )
                 deliveries.append(
                     TelegramLifecycleDelivery(
@@ -4303,6 +4317,9 @@ class TelegramLifecycleDeliveryService:
                         reservation_id=attempt.id,
                         state=FAILED_FINAL,
                         reason=reason,
+                        expected_state=row["delivery_state"],
+                        expected_attempt_id=row["attempt_id"],
+                        expected_attempt_count=row["attempt_count"],
                     )
                     deliveries.append(
                         TelegramLifecycleDelivery(
@@ -4331,6 +4348,9 @@ class TelegramLifecycleDeliveryService:
                     reservation_id=attempt.id,
                     state=FAILED_FINAL,
                     reason="public_lifecycle_outbox_payload_missing",
+                    expected_state=row["delivery_state"],
+                    expected_attempt_id=row["attempt_id"],
+                    expected_attempt_count=row["attempt_count"],
                 )
                 deliveries.append(
                     TelegramLifecycleDelivery(

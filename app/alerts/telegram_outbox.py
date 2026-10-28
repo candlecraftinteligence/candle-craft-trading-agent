@@ -442,37 +442,121 @@ class SQLitePublicTelegramOutbox:
         state: str,
         reason: str,
         now: str | None = None,
-    ) -> None:
+        expected_state: str = PENDING,
+        expected_attempt_id: str | None = None,
+        expected_attempt_count: int = 0,
+    ) -> bool:
+        """Terminalize only an unchanged, unclaimed or rejected-retry snapshot.
+
+        Defaults authorize only the original PENDING intent, never an attempt.
+        A RETRYABLE caller must supply its observed attempt ID and count. This
+        is not a postclaim abort: even an exact IN_FLIGHT owner is rejected.
+        False means no rows changed (including repeated terminalization).
+        """
         terminal = _state(state)
         if terminal not in {SKIPPED_DRY_RUN, POLICY_DISABLED, FAILED_FINAL}:
             raise ValueError(f"Unsupported no-send terminal state: {state}")
+        if expected_state not in AUTO_CLAIMABLE_STATES:
+            return False
         timestamp = now or _now_iso()
         with self._transaction():
             try:
-                require_event_reservation_association(
+                event, reservation = require_event_reservation_association(
                     self.connection,
                     event_id=int(event_id),
                     reservation_id=int(reservation_id),
                 )
             except RuntimeEpochOwnershipError:
-                return
-            owned = self.connection.execute(
-                "SELECT * FROM public_alert_events WHERE id = ?",
+                return False
+            parts = self.connection.execute(
+                "SELECT * FROM public_alert_delivery_parts WHERE public_alert_event_id = ? ORDER BY part_index",
                 (int(event_id),),
-            ).fetchone()
-            if not decide_public_effect(self.connection, owned).allowed:
-                return
+            ).fetchall()
+            if not self._no_send_snapshot_matches(
+                event, reservation, parts, expected_state=expected_state,
+                expected_attempt_id=expected_attempt_id,
+                expected_attempt_count=expected_attempt_count,
+            ):
+                return False
+            # BEGIN IMMEDIATE fences all checks and all three projections across
+            # independent processes. CAS also states the exact authority in SQL.
+            cursor = self.connection.execute(
+                """
+                UPDATE public_alert_events SET delivery_state = ?
+                WHERE id = ? AND canonical_reservation_attempt_id = ?
+                  AND delivery_state = ? AND attempt_id IS ? AND attempt_count = ?
+                """,
+                (terminal, int(event_id), int(reservation_id), expected_state,
+                 expected_attempt_id, expected_attempt_count),
+            )
+            if cursor.rowcount != 1:
+                return False
             self.connection.execute(
                 """
                 UPDATE public_alert_delivery_parts
-                SET delivery_state = ?, last_error_category = ?, last_error_detail = ?, updated_at = ?
-                WHERE public_alert_event_id = ? AND delivery_state = ?
+                SET delivery_state = ?, next_retry_at = NULL,
+                    last_error_category = ?, last_error_detail = ?, updated_at = ?
+                WHERE public_alert_event_id = ? AND delivery_state IN (?, ?)
                 """,
-                (terminal, reason, reason, timestamp, int(event_id), PENDING),
+                (terminal, reason, reason, timestamp, int(event_id), PENDING, RETRYABLE),
             )
             self._mark_event_locked(
                 event_id, reservation_id, terminal, reason, reason, timestamp
             )
+            return True
+
+    @staticmethod
+    def _no_send_snapshot_matches(
+        event: sqlite3.Row,
+        reservation: sqlite3.Row,
+        parts: Sequence[sqlite3.Row],
+        *,
+        expected_state: str,
+        expected_attempt_id: str | None,
+        expected_attempt_count: int,
+    ) -> bool:
+        if (
+            event["delivery_state"] != expected_state
+            or reservation["delivery_state"] != expected_state
+            or event["attempt_id"] != expected_attempt_id
+            or reservation["delivery_attempt_id"] != expected_attempt_id
+            or event["attempt_count"] != expected_attempt_count
+            or reservation["delivery_attempt_count"] != expected_attempt_count
+            or event["status"] != "RESERVED"
+            or event["lease_expires_at"] is not None
+            or event["uncertain_at"] is not None
+            or event["completed_at"] is not None
+            or event["next_retry_at"] != reservation["delivery_next_retry_at"]
+        ):
+            return False
+        if expected_state == PENDING:
+            if expected_attempt_id is not None or expected_attempt_count != 0:
+                return False
+            if any(event[key] is not None for key in ("claimed_at", "claim_owner", "attempt_started_at")):
+                return False
+        elif not expected_attempt_id or expected_attempt_count <= 0:
+            return False
+        if not parts or len(parts) != event["part_count"] or len(parts) != reservation["delivery_part_count"]:
+            return False
+        for record in (event, reservation, *parts):
+            if any(record[key] is not None for key in ("sent_at", "telegram_message_id", "telegram_chat_id")):
+                return False
+        for index, part in enumerate(parts, start=1):
+            if (
+                part["event_key"] != event["event_key"]
+                or part["part_index"] != index
+                or part["part_count"] != len(parts)
+            ):
+                return False
+            if part["delivery_state"] == PENDING:
+                if any(part[key] is not None for key in ("attempt_id", "attempt_started_at", "next_retry_at", "http_status")) or part["attempt_count"] != 0:
+                    return False
+            elif expected_state == RETRYABLE and part["delivery_state"] == RETRYABLE:
+                if part["attempt_id"] != expected_attempt_id or not 0 < part["attempt_count"] <= expected_attempt_count:
+                    return False
+            else:
+                return False
+        return True
 
     def mark_uncertain_after_persistence_failure(
         self, *, event_id: int, reservation_id: int, detail: str, now: str | None = None
