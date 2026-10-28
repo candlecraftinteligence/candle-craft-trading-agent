@@ -35,7 +35,7 @@ from app.alerts.telegram_outbox import (
 )
 from app.data.dtos import NA
 from app.runtime_epoch.authority import load_active_runtime_epoch, require_active_runtime_epoch
-from app.runtime_epoch.errors import RuntimeEpochError, RuntimeEpochOwnershipError
+from app.runtime_epoch.errors import RuntimeEpochConfigurationError, RuntimeEpochError, RuntimeEpochOwnershipError
 from app.runtime_epoch.models import RuntimeEpochIdentity
 from app.runtime_epoch.ownership import (
     decide_public_effect,
@@ -214,7 +214,7 @@ class TelegramOutboxWorker:
 
         task = asyncio.current_task()
         uncancel_count = 0
-        if stage == "persistence" and task is not None:
+        if stage in ("preparation", "persistence") and task is not None:
             while task.cancelling():
                 task.uncancel()
                 uncancel_count += 1
@@ -230,7 +230,7 @@ class TelegramOutboxWorker:
 
         lock_cancelled: BaseException | None = None
         try:
-            if stage == "persistence":
+            if stage in ("preparation", "persistence"):
                 acquire_task = asyncio.create_task(self._admission.acquire())
                 _, lock_cancelled = await _fenced_wait(acquire_task)
                 if lock_cancelled is not None and task is not None:
@@ -265,7 +265,7 @@ class TelegramOutboxWorker:
                     raise (cancelled or asyncio.CancelledError()) from receipt.error
                 raise receipt.error
 
-            if stage == "persistence":
+            if stage in ("preparation", "persistence"):
                 if (uncancel_count > 0 or cancelled is not None) and task is not None:
                     task.cancel()
                 return receipt.value
@@ -350,10 +350,13 @@ def stage_1_outbox_preparation(
     try:
         epoch = load_active_runtime_epoch(connection)
         if epoch is None:
-            raise RuntimeEpochOwnershipError("active_runtime_epoch_missing")
+            raise RuntimeEpochConfigurationError("active_runtime_epoch_missing")
 
-        require_event_reservation_association(connection, event_id=int(event_id), reservation_id=int(reservation_id))
-        require_canonical_reservation_for_public_effect(connection, event_id=int(event_id))
+        try:
+            require_event_reservation_association(connection, event_id=int(event_id), reservation_id=int(reservation_id))
+            require_canonical_reservation_for_public_effect(connection, event_id=int(event_id))
+        except RuntimeEpochOwnershipError as err:
+            raise OutboxPreparationError(f"canonical_reservation_invalid:{str(err)}") from err
 
         event_row = connection.execute(
             "SELECT * FROM public_alert_events WHERE id = ?",
@@ -462,7 +465,15 @@ def stage_1_outbox_preparation(
 
 
 def normalize_transport_outcome(outcome: Any) -> TelegramTransportOutcome:
-    """Validate and normalize external transport outcome against Telegram provider evidence contracts."""
+    """Validate and normalize external transport outcome against Telegram provider evidence contracts.
+
+    ADAPTER INTEGRATION OBLIGATION (Phase P0B3B2):
+    The standalone P0B3B1 protocol requires an explicit `TelegramTransportOutcome` containing verified
+    `http_status=200` and non-empty `telegram_message_id`. When integrating `TelegramSender` in P0B3B2,
+    an adapter function must extract the underlying `result['http_status']` and `result['message_id']`
+    from `TelegramSendResult.telegram_results` to produce a verified `TelegramTransportOutcome`.
+    Missing or unverified HTTP statuses must not silently count as proven HTTP 200.
+    """
     if not isinstance(outcome, TelegramTransportOutcome):
         return TelegramTransportOutcome(
             delivery_state=UNCERTAIN,
@@ -490,15 +501,21 @@ def normalize_transport_outcome(outcome: Any) -> TelegramTransportOutcome:
                 error_category="confirmed_success_missing_message_id",
                 error="Telegram success response omitted a valid message ID; acceptance is uncertain.",
             )
-        if outcome.http_status is not None and outcome.http_status != 200:
+        if outcome.http_status != 200:
+            err_cat = "missing_success_http_status" if outcome.http_status is None else "contradictory_success_http_status"
+            err_msg = (
+                "Telegram success response omitted HTTP status; acceptance is uncertain."
+                if outcome.http_status is None
+                else f"Transport claimed SENT with non-200 HTTP status: {outcome.http_status}"
+            )
             return TelegramTransportOutcome(
                 delivery_state=UNCERTAIN,
                 http_status=outcome.http_status,
                 telegram_message_id=msg_id,
                 telegram_chat_id=outcome.telegram_chat_id,
                 sent_at=outcome.sent_at,
-                error_category="contradictory_success_http_status",
-                error=f"Transport claimed SENT with non-200 HTTP status: {outcome.http_status}",
+                error_category=err_cat,
+                error=err_msg,
             )
         if outcome.error not in (None, "", NA):
             return TelegramTransportOutcome(
@@ -698,17 +715,40 @@ def stage_3_outbox_persistence(
         actual_part_state = str(verified_part["delivery_state"] or "").strip().upper()
         actual_event_state = str(verified_event["delivery_state"] or "").strip().upper()
 
+        parts = list_outbox_parts(connection, event_id=receipt.event_id)
+        all_sent = bool(parts) and all(p.delivery_state == SENT for p in parts)
+
+        # Committed state proof (Issue 4):
+        # A worker return value alone must not substitute for committed-state proof.
+        # Explicitly account for multipart case where part=SENT and event=IN_FLIGHT until all parts complete.
+        if state == SENT:
+            if actual_part_state != SENT:
+                raise PersistenceCommitFailureError(
+                    f"Part {receipt.part_id} delivery_state={actual_part_state} does not match expected SENT"
+                )
+            if all_sent and actual_event_state != SENT:
+                raise PersistenceCommitFailureError(
+                    f"All parts sent but event {receipt.event_id} delivery_state={actual_event_state} != SENT"
+                )
+            if not all_sent and actual_event_state != IN_FLIGHT:
+                raise PersistenceCommitFailureError(
+                    f"Multipart partial send: event {receipt.event_id} delivery_state={actual_event_state} != IN_FLIGHT"
+                )
+        elif state == UNCERTAIN:
+            if actual_event_state != UNCERTAIN or actual_part_state != UNCERTAIN:
+                raise PersistenceCommitFailureError(
+                    f"Event {receipt.event_id} remained in state {actual_event_state} (part state={actual_part_state}) after fallback to UNCERTAIN"
+                )
+        elif state in (RETRYABLE, FAILED_FINAL):
+            if actual_part_state not in (RETRYABLE, FAILED_FINAL):
+                raise PersistenceCommitFailureError(
+                    f"Part {receipt.part_id} state {actual_part_state} does not match outcome {state}"
+                )
+
         if actual_part_state == IN_FLIGHT and state != IN_FLIGHT:
             raise PersistenceCommitFailureError(
                 f"Part {receipt.part_id} remained IN_FLIGHT after attempted persistence to {state}"
             )
-        if state == UNCERTAIN and (actual_event_state != UNCERTAIN or actual_part_state != UNCERTAIN):
-            raise PersistenceCommitFailureError(
-                f"Event {receipt.event_id} remained in state {actual_event_state} after fallback to UNCERTAIN"
-            )
-
-        parts = list_outbox_parts(connection, event_id=receipt.event_id)
-        all_sent = bool(parts) and all(p.delivery_state == SENT for p in parts)
 
         return DurableDeliveryReceipt(
             event_id=receipt.event_id,
@@ -757,16 +797,26 @@ async def deliver_single_reserved_part(
             attempt_id=attempt_id,
             stage="preparation",
         )
-    except (OutboxClaimRejected, OutboxPreparationError, RuntimeEpochOwnershipError, RuntimeEpochError) as exc:
+    except OutboxClaimRejected as exc:
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise asyncio.CancelledError() from exc
-        status_label = "skipped" if isinstance(exc, OutboxClaimRejected) else "blocked"
         return TelegramDeliveryProtocolResult(
-            status=status_label,
+            status="skipped",
+            error_message=str(exc),
+            detail="Outbox claim rejected by state machine",
+        )
+    except OutboxPreparationError as exc:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError() from exc
+        return TelegramDeliveryProtocolResult(
+            status="blocked",
             error_message=str(exc),
             detail=f"Outbox preparation stopped by authority: {type(exc).__name__}",
         )
+    except (asyncio.CancelledError, KeyboardInterrupt, RuntimeEpochError, sqlite3.DatabaseError):
+        raise
     except Exception as exc:
         task = asyncio.current_task()
         if task is not None and task.cancelling():

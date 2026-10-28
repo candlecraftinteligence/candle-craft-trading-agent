@@ -2,7 +2,7 @@
 # P0B3B1 — TELEGRAM OUTBOX TRANSACTION / TRANSPORT PROTOCOL FOUNDATION HANDOFF
 
 ```yaml
-PHASE: P0B3B1 (HARDENED RELEASE GATE)
+PHASE: P0B3B1 (FINAL CONTRACT CORRECTION & REGRESSION RESTORATION)
 STATUS: COMPLETED
 CODING_ENVIRONMENT: DEV_PC_ONLY
 HOST: Windows 11 (DEV PC)
@@ -11,60 +11,134 @@ GITHUB_REPO: https://github.com/candlecraftinteligence/candle-craft-trading-agen
 P0B3A_MERGE_SHA: 8308b32a885abbba6f3317bdb1cea669863db313
 FEATURE_BRANCH: feature/p0b3b1-telegram-outbox-protocol-foundation
 BASE_SHA: 8308b32a885abbba6f3317bdb1cea669863db313
-PREVIOUS_HEAD_SHA: 3f0dcaee8c628425ef427a10b4fe013c0431267c
-PREVIOUS_HEAD_CI: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40589390588
+REVIEWED_HEAD_SHA: 3aa0c8cc0bb753b2f281afc3393db5d9685de4c2
+LAST_SUCCESSFUL_CI: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40594723659
 LIVE_DELIVERY_PATH_MODIFIED: NO
 PRODUCTION_DEPLOYMENT_APPROVED: NO
 NEXT_RECOMMENDED_PHASE: P0B3B2
+PR_URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/157
+MERGE_STATUS: OPEN
 ```
 
 ---
 
-## 1. Executive Summary & Hardening Scope
+## 1. Executive Summary
 
-This phase completes the safety-hardening pass of the **P0B3B1 Telegram outbox transaction/transport protocol foundation**.
+This release completes the final contract correction and regression restoration pass for the **P0B3B1 Telegram outbox transaction/transport protocol foundation**.
 
-Four critical correctness issues identified during independent architectural review were investigated, deterministically reproduced, and resolved with targeted, minimal changes:
+All four release-contract discrepancies identified during independent architecture and regression review have been resolved, deterministically verified, and confirmed against all test suites:
 
-1. **Issue 1 — Repeated Cancellation During Stage 3 Persistence**: Fenced admission lock acquisition and persistence execution to prevent cancellation from interrupting Stage 3 before worker admission or database completion.
-2. **Issue 2 — False Durable Receipt After SQLite Failure**: Eliminated unverified receipts caused by silent error suppression in legacy fallbacks; introduced mandatory independent SQLite commit verification queries before issuing any `DurableDeliveryReceipt`.
-3. **Issue 3 — Telegram SENT Evidence & Ambiguous HTTP Outcomes**: Enforced strict provider acknowledgment validation (`SENT` requires HTTP 200, non-empty message ID, and no rate limiting) and normalized ambiguous edge errors (HTTP 5xx after transmission started fails closed to `UNCERTAIN` to prevent duplicate public signals).
-4. **Issue 4 — Stage 1 Cancellation Combined with Worker Exception**: Preserved cancellation intent and chained fatal epoch errors (`RuntimeEpochOwnershipError`, `RuntimeEpochError`) so that cancellation is not masked as ordinary recoverable validation failure.
+1. **Issue 1 — Sent Evidence Contract Reconciled**:
+   - `normalize_transport_outcome()` now strictly rejects missing HTTP statuses (`http_status=None`), failing closed to `UNCERTAIN` (`missing_success_http_status`).
+   - A `SENT` delivery state strictly requires: HTTP 200, non-empty `telegram_message_id`, no provider error message, and not rate limited.
+   - Preserves legitimate Telegram sender compatibility while preventing ambiguous acknowledgments from being treated as proven delivery.
+   - Documented the Phase P0B3B2 adapter obligation to translate raw `TelegramSendResult` from `TelegramSender` into verified `TelegramTransportOutcome`.
+2. **Issue 2 — Fatal Runtime Epoch Errors vs Claim Rejections vs Ordinary Eligibility Refusals**:
+   - Stage 1 cleanly distinguishes:
+     - **Expected claim rejection** (`OutboxClaimRejected` $\rightarrow$ returns `status="skipped"`).
+     - **Missing canonical reservation** (`OutboxPreparationError` $\rightarrow$ returns `status="blocked"` without transport call).
+     - **Ordinary public eligibility refusal** (`RuntimeEpochOwnershipError` $\rightarrow$ raises `OutboxPreparationError`, returning `status="blocked"` without transport call).
+     - **Fatal runtime epoch mismatch** (`RuntimeEpochConfigurationError`, `RuntimeEpochMismatchError`, `RuntimeEpochMissingError`, `RuntimeEpochCutoffExceeded` $\rightarrow$ propagates uncaught fatal `RuntimeEpochError`).
+     - **Fatal database errors** (`sqlite3.DatabaseError` $\rightarrow$ propagates uncaught fatal database error).
+   - Fatal runtime epoch and database errors propagate even if the caller task was cancelled, with zero transport invocations.
+3. **Issue 3 — Full Baseline Test Suite Restored Alongside Hardening & Evidence Tests**:
+   - Restored all 22 original baseline scenarios (`test_baseline_01` through `test_baseline_22`).
+   - Retained all 20 safety hardening scenarios (`test_hardening_01` through `test_hardening_20`).
+   - Retained 10 dedicated evidence contract and fatal epoch boundary scenarios (`test_evidence_...` and `test_fatal_epoch_...`).
+   - Total test suite now contains **52 passing synthetic tests**, strictly checking transport invocation counts.
+4. **Issue 4 — Durable Receipt Matching & Multipart Delivery Invariants**:
+   - `stage_3_outbox_persistence()` independently queries SQLite rows to verify committed states against the target state before issuing `DurableDeliveryReceipt`.
+   - Explicitly accounts for multipart deliveries: part 1 correctly commits with `part=SENT` while `event=IN_FLIGHT` until all parts finish.
+   - Returns `DurableDeliveryReceipt.delivery_state` matching the committed SQLite row.
 
 ---
 
-## 2. Hardening Investigations & Implemented Corrections
+## 2. Detailed Technical Resolutions
 
-### Issue 1: Repeated Cancellation During Stage 3
-- **Vulnerability**: In `TelegramOutboxWorker.call()`, `await self._admission.acquire()` was previously unprotected. If cancelled while waiting for admission to persist post-HTTP outcomes, `CancelledError` was raised before enqueueing the job, leaving the database row in `IN_FLIGHT` despite completed external HTTP transmission.
-- **Reproduction**: Reproduced by cancelling the delivery task after HTTP transmission returned but before Stage 3 worker admission.
-- **Correction**:
-  - Admission acquisition for `stage == "persistence"` is wrapped in an `asyncio.Task` and awaited via `_fenced_wait`, ensuring admission cannot be aborted by cancellation.
-  - In Python 3.11, pending cancellation is uncancelled during bounded persistence and re-raised only after durability is resolved.
-  - In `TelegramOutboxWorker.aclose()`, shutdown is cleanly awaited via `_fenced_wait` without leaving zombie threads.
+### Issue 1: Sent Evidence Contract & Adapter Obligation
+- **Problem**: Previously, `normalize_transport_outcome()` allowed `SENT` outcomes where `http_status` was `None`. This contradicted the documented contract requiring verified HTTP 200 acknowledgment.
+- **Resolution**:
+  - In `app/alerts/telegram_outbox_protocol.py`:
+    ```python
+    if outcome.http_status != 200:
+        err_cat = "missing_success_http_status" if outcome.http_status is None else "contradictory_success_http_status"
+        err_msg = (
+            "Telegram success response omitted HTTP status; acceptance is uncertain."
+            if outcome.http_status is None
+            else f"Transport claimed SENT with non-200 HTTP status: {outcome.http_status}"
+        )
+        return TelegramTransportOutcome(
+            delivery_state=UNCERTAIN,
+            http_status=outcome.http_status,
+            telegram_message_id=msg_id,
+            telegram_chat_id=outcome.telegram_chat_id,
+            sent_at=outcome.sent_at,
+            error_category=err_cat,
+            error=err_msg,
+        )
+    ```
+  - Documented the Phase P0B3B2 adapter obligation in docstring:
+    ```python
+    """Validate and normalize external transport outcome against Telegram provider evidence contracts.
 
-### Issue 2: False Durable Receipt After SQLite Failure
-- **Vulnerability**: Legacy helper `SQLitePublicTelegramOutbox.mark_uncertain_after_persistence_failure()` catches and suppresses `sqlite3.Error` internally (`except sqlite3.Error: return`). Consequently, if `record_part_result` failed and the fallback also failed to commit, Stage 3 was previously returning a `DurableDeliveryReceipt(delivery_state=UNCERTAIN)` while SQLite still held `IN_FLIGHT`.
-- **Reproduction**: Synthesized SQLite `OperationalError` during `record_part_result` paired with a silent fallback no-op.
-- **Correction**:
-  - Implemented mandatory post-commit verification query directly against SQLite: validates exact `event_id`, `reservation_id`, `part_id`, `attempt_id`, and verifies that neither event nor part remains `IN_FLIGHT`.
-  - Also verified that if fallback to `UNCERTAIN` occurred, the fallback state was actually written and committed in SQLite.
-  - If SQLite state does not match the requested state, raises `PersistenceCommitFailureError`. The coordinator catches this and returns `status="unresolved_persistence"` with `durable_receipt=None`.
+    ADAPTER INTEGRATION OBLIGATION (Phase P0B3B2):
+    The standalone P0B3B1 protocol requires an explicit `TelegramTransportOutcome` containing verified
+    `http_status=200` and non-empty `telegram_message_id`. When integrating `TelegramSender` in P0B3B2,
+    an adapter function must extract the underlying `result['http_status']` and `result['message_id']`
+    from `TelegramSendResult.telegram_results` to produce a verified `TelegramTransportOutcome`.
+    Missing or unverified HTTP statuses must not silently count as proven HTTP 200.
+    """
+    ```
 
-### Issue 3: Telegram SENT Evidence & Ambiguous HTTP Outcomes
-- **Vulnerability**: In distributed reverse-proxy environments (e.g. Cloudflare / Telegram Bot API gateways), HTTP 5xx responses (500, 502, 503, 504) returned after transmission started can represent successful gateway ingest. Retrying these as `RETRYABLE` risks duplicate public signals. Furthermore, a provider claiming `SENT` without a message ID cannot be confirmed.
-- **Reproduction**: Tested transport outcomes claiming `SENT` with missing message IDs, non-200 HTTP codes, or HTTP 5xx statuses.
-- **Correction**:
-  - Implemented `normalize_transport_outcome(outcome)`:
-    - `SENT` requires non-empty `telegram_message_id`, `http_status == 200`, `error in (None, "", NA)`, and `not rate_limited`. Contradictory successes fail closed to `UNCERTAIN`.
-    - `RETRYABLE` with HTTP status $500 \le \text{status} \le 599$ after transmission started is normalized to `UNCERTAIN` (`http_5xx_uncertain_acceptance`), preventing unsafe automated re-transmissions.
+### Issue 2: Fatal Runtime Epoch Errors vs Eligibility Refusals
+- **Problem**: Stage 1 exception handling previously caught `RuntimeEpochError` and masked fatal epoch mismatches into `status="blocked"`. Additionally, ordinary public eligibility refusals (like unverified legacy records or audit-only attempts) were not distinguished from database-wide configuration errors.
+- **Resolution**:
+  - `open_repository_database()` continues to enforce operational identity. Any database-level epoch mismatch, cutoff violation, or schema version mismatch raises fatal `RuntimeEpochConfigurationError` / `RuntimeEpochMismatchError`.
+  - In `stage_1_outbox_preparation()`, per-record ownership/eligibility checks (`require_event_reservation_association`, `require_canonical_reservation_for_public_effect`) raise `RuntimeEpochOwnershipError` when an event is legacy/unverified, audit-only, or has missing reservations. These are converted to `OutboxPreparationError`, returning `status="blocked"` with 0 transport calls.
+  - In `deliver_single_reserved_part()`:
+    ```python
+    except OutboxClaimRejected as exc:
+        ...
+        return TelegramDeliveryProtocolResult(status="skipped", ...)
+    except OutboxPreparationError as exc:
+        ...
+        return TelegramDeliveryProtocolResult(status="blocked", ...)
+    except (asyncio.CancelledError, KeyboardInterrupt, RuntimeEpochError, sqlite3.DatabaseError):
+        raise
+    ```
+  - In `TelegramOutboxWorker.call()`:
+    - Bounded fencing is applied to both preparation and persistence stages so that fatal epoch and database errors are raised cleanly to the caller even if `task.cancelling()` was True.
+    - Verified that zero transport calls occur on any fatal Stage 1 failure.
 
-### Issue 4: Stage 1 Cancellation Precedence
-- **Vulnerability**: If a task was cancelled while Stage 1 was executing, catching `OutboxPreparationError` could mask cancellation as an ordinary recoverable validation failure (`status="blocked"`), allowing subsequent scanner iterations to proceed instead of stopping cooperatively.
-- **Reproduction**: Cancelled task during Stage 1 worker preparation.
-- **Correction**:
-  - Stage 1 preserves cancellation intent: if `task.cancelling()` is active, `deliver_single_reserved_part` re-raises `asyncio.CancelledError`.
-  - Fatal errors (`RuntimeEpochOwnershipError`, `RuntimeEpochError`, `sqlite3.DatabaseError`) are never suppressed or converted into ordinary failures; they are re-raised with cancellation chained (`raise receipt.error from cancelled`).
+### Issue 3: Restored Full Test Suite (52 Tests)
+- **Problem**: Previous commit replaced baseline regression tests with hardening tests.
+- **Resolution**:
+  - Combined all 22 baseline scenarios, 20 safety hardening scenarios, and 10 dedicated evidence/fatal epoch scenarios into [`tests/test_p0b3b1_telegram_outbox_protocol.py`](file:///C:/CandleCraftDev/tests/test_p0b3b1_telegram_outbox_protocol.py).
+  - All 52 tests run deterministically and synchronously using `asyncio.run()`, with strict assertion on `len(transport.calls)`.
+
+### Issue 4: Durable Receipt Matching & Multipart Invariants
+- **Problem**: Multipart deliveries have distinct committed states: for part 1 of a multipart message, `public_alert_delivery_parts.delivery_state == 'SENT'` while `public_alert_events.delivery_state == 'IN_FLIGHT'` until all parts finish. A naive equality check against the event row resulted in false persistence commit failure.
+- **Resolution**:
+  - In `stage_3_outbox_persistence()`:
+    ```python
+    if state == SENT:
+        if actual_part_state != SENT:
+            raise PersistenceCommitFailureError(
+                f"Part {receipt.part_id} delivery_state={actual_part_state} does not match expected SENT"
+            )
+        if all_sent and actual_event_state != SENT:
+            raise PersistenceCommitFailureError(
+                f"All parts sent but event {receipt.event_id} delivery_state={actual_event_state} != SENT"
+            )
+        if not all_sent and actual_event_state != IN_FLIGHT:
+            raise PersistenceCommitFailureError(
+                f"Multipart partial send: event {receipt.event_id} delivery_state={actual_event_state} != IN_FLIGHT"
+            )
+    elif state == UNCERTAIN:
+        if actual_event_state != UNCERTAIN or actual_part_state != UNCERTAIN:
+            raise PersistenceCommitFailureError(...)
+    ```
+  - Validates exact consistency between SQLite rows and the returned `DurableDeliveryReceipt`.
 
 ---
 
@@ -74,94 +148,119 @@ Four critical correctness issues identified during independent architectural rev
 |---|---|---|
 | `CANCELLATION_ADMISSION_SAFETY` | Stage 3 persistence cannot be aborted before admission or completion by single or repeated cancellations | **CONFIRMED** |
 | `POST_HTTP_PERSISTENCE_SAFETY` | Post-HTTP persistence is fenced; durable database outcome is established before cancellation propagates | **CONFIRMED** |
-| `DURABLE_RECEIPT_VERIFICATION` | `DurableDeliveryReceipt` issued ONLY after independent SQLite query confirms actual committed state; no false receipts | **CONFIRMED** |
+| `DURABLE_RECEIPT_VERIFICATION` | `DurableDeliveryReceipt` issued ONLY after independent SQLite query confirms actual committed state | **CONFIRMED** |
 | `TRANSPORT_SENT_EVIDENCE` | `SENT` strictly requires HTTP 200, valid provider message ID, zero error, and not rate-limited | **CONFIRMED** |
-| `UNCERTAIN_RETRY_SAFETY` | HTTP 5xx after transmission started fails closed to `UNCERTAIN`; no automated duplicate public broadcasts | **CONFIRMED** |
+| `MISSING_HTTP_STATUS_CLOSED` | Success outcomes missing HTTP status fail closed to `UNCERTAIN` (`missing_success_http_status`) | **CONFIRMED** |
+| `FATAL_EPOCH_PROPAGATION` | Database-level epoch mismatches and SQLite disk/corruption errors propagate uncaught as fatal errors | **CONFIRMED** |
+| `ORDINARY_ELIGIBILITY_BLOCKED` | Legacy/unverified records and audit-only reservations return `blocked` with 0 transport calls | **CONFIRMED** |
 | `CANONICAL_RESERVATION_GUARD` | Canonical reservations and historical 11 quarantined records are preserved without mutation | **CONFIRMED** |
 | `ZERO_HTTP_ON_BLOCKED_STAGE1` | Any failure or cancellation prior to Stage 2 guarantees exactly 0 HTTP transport calls | **CONFIRMED** |
 | `EVENT_LOOP_ZERO_CONNECTION_HOLDING` | Zero SQLite connections or transaction contexts held across asynchronous network awaits | **CONFIRMED** |
 
 ---
 
-## 4. Hardening Test Suite Evidence
+## 4. Test Suite Evidence
 
-Test suite [`tests/test_p0b3b1_telegram_outbox_protocol.py`](file:///C:/CandleCraftDev/tests/test_p0b3b1_telegram_outbox_protocol.py) executes 20 dedicated hardening scenarios plus 3 regression guards (23 tests total):
+### 4.1 Protocol Test Suite (`tests/test_p0b3b1_telegram_outbox_protocol.py`)
+52 tests total:
+- **Part 1: Baseline Protocol Tests (22 tests)**:
+  - `test_baseline_01_single_part_happy_path_sent`
+  - `test_baseline_02_single_part_retryable_error`
+  - `test_baseline_03_single_part_failed_final`
+  - `test_baseline_04_two_competing_claimants_atomic_claim_race`
+  - `test_baseline_05_multithreaded_claim_race`
+  - `test_baseline_06_in_flight_timeout_recovery_reclaim`
+  - `test_baseline_07_in_flight_active_lease_rejected`
+  - `test_baseline_08_uncertain_outcome_stops_subsequent_attempts`
+  - `test_baseline_09_max_attempts_exhaustion_failed_final`
+  - `test_baseline_10_cancellation_after_committed_claim_before_http`
+  - `test_baseline_11_cancellation_during_http_uncertain_recovery`
+  - `test_baseline_12_cancellation_after_http_before_receipt`
+  - `test_baseline_13_worker_closed_rejects_new_calls`
+  - `test_baseline_14_worker_saturation_bounded_queue`
+  - `test_baseline_15_worker_drain_and_shutdown`
+  - `test_baseline_16_multipart_all_parts_sent_event_marked_sent`
+  - `test_baseline_17_multipart_partial_failure_part1_sent_part2_uncertain`
+  - `test_baseline_18_idempotent_duplicate_submission`
+  - `test_baseline_19_unassociated_reservation_rejected`
+  - `test_baseline_20_missing_canonical_reservation_blocked`
+  - `test_baseline_21_database_error_during_claim_propagated`
+  - `test_baseline_22_no_mutation_of_historical_quarantined_records`
+- **Part 2: Safety Hardening Tests (20 tests)**:
+  - `test_hardening_01_cancellation_after_http_before_stage3_admission`
+  - `test_hardening_02_repeated_cancellation_during_admission_wait`
+  - `test_hardening_03_cancellation_during_stage3_transaction`
+  - `test_hardening_04_cancellation_during_commit`
+  - `test_hardening_05_cancellation_during_worker_shutdown`
+  - `test_hardening_06_sqlite_result_persistence_raises_before_commit`
+  - `test_hardening_07_sqlite_uncertain_fallback_silently_fails`
+  - `test_hardening_08_database_remains_in_flight_after_failed_fallback`
+  - `test_hardening_09_no_false_durable_delivery_receipt`
+  - `test_hardening_10_valid_http_success_verified_message_id`
+  - `test_hardening_11_malformed_sent_outcome_no_message_id`
+  - `test_hardening_12_contradictory_sent_outcome_failed_http_status`
+  - `test_hardening_13_unknown_provider_acknowledgment`
+  - `test_hardening_14_http_5xx_uncertain_acceptance`
+  - `test_hardening_15_stage_1_cancellation_combined_with_worker_exception`
+  - `test_hardening_16_two_concurrent_claimants`
+  - `test_hardening_17_independent_process_claim_ownership`
+  - `test_hardening_18_multipart_success_and_partial_uncertainty`
+  - `test_hardening_19_restart_after_unresolved_persistence`
+  - `test_hardening_20_no_second_http_call_for_uncertain_delivery`
+- **Part 3: Evidence Contract & Fatal Epoch Boundary Tests (10 tests)**:
+  - `test_evidence_sent_with_http_status_missing`
+  - `test_evidence_sent_with_http_200_and_valid_message_id`
+  - `test_evidence_sent_with_contradictory_http_status`
+  - `test_evidence_sent_with_missing_or_invalid_message_id`
+  - `test_evidence_sent_with_provider_error`
+  - `test_evidence_sent_with_rate_limit_indication`
+  - `test_evidence_unknown_transport_result_type`
+  - `test_fatal_epoch_mismatch_uncancelled_caller`
+  - `test_fatal_epoch_mismatch_cancelled_caller`
+  - `test_fatal_epoch_zero_transport_calls`
 
-| # | Hardening Scenario | Verified Behavior | Calls | Status |
-|---|---|---|---|---|
-| **01** | Cancellation after HTTP before Stage 3 admission | Fenced admission; commits `SENT`; re-raises `CancelledError` | Exactly 1 | **PASSED** |
-| **02** | Repeated cancellation during admission wait | Double cancellation cannot abort admission; commits `SENT` | Exactly 1 | **PASSED** |
-| **03** | Cancellation during Stage 3 transaction | Worker transaction completes atomically; commits `SENT` | Exactly 1 | **PASSED** |
-| **04** | Cancellation during commit | Commit completes; commits `SENT`; re-raises `CancelledError` | Exactly 1 | **PASSED** |
-| **05** | Cancellation during worker shutdown | Thread joined cleanly; zero zombie threads | Exactly 0 | **PASSED** |
-| **06** | SQLite result persistence raises before commit | Fallback catches error and commits `UNCERTAIN` | Exactly 1 | **PASSED** |
-| **07** | SQLite UNCERTAIN fallback silently fails | Verification detects uncommitted state; returns `unresolved_persistence` | Exactly 1 | **PASSED** |
-| **08** | Database remains IN_FLIGHT after failed fallback | SQLite row verified in `IN_FLIGHT`; never falsely declared `UNCERTAIN` | Exactly 1 | **PASSED** |
-| **09** | No false DurableDeliveryReceipt | `durable_receipt is None` when persistence was unverified | Exactly 1 | **PASSED** |
-| **10** | Valid HTTP success with verified message ID | Validated as `SENT`; durable receipt issued | Exactly 1 | **PASSED** |
-| **11** | Success missing Telegram message ID | Normalized to `UNCERTAIN` (`confirmed_success_missing_message_id`) | Exactly 1 | **PASSED** |
-| **12** | Contradictory success with HTTP 500 | Normalized to `UNCERTAIN` (`contradictory_success_http_status`) | Exactly 1 | **PASSED** |
-| **13** | Contradictory success reporting error message | Normalized to `UNCERTAIN` (`contradictory_success_error`) | Exactly 1 | **PASSED** |
-| **14** | Contradictory success marked rate_limited | Normalized to `UNCERTAIN` (`contradictory_success_rate_limited`) | Exactly 1 | **PASSED** |
-| **15** | Ambiguous HTTP 500 server error | Normalized to `UNCERTAIN` (`http_5xx_uncertain_acceptance`) | Exactly 1 | **PASSED** |
-| **16** | Ambiguous HTTP 502 bad gateway | Normalized to `UNCERTAIN` (`http_5xx_uncertain_acceptance`) | Exactly 1 | **PASSED** |
-| **17** | Stage 1 cancelled before worker execution | Re-raises `CancelledError`; 0 HTTP calls; 0 DB mutations | Exactly 0 | **PASSED** |
-| **18** | Stage 1 worker exception and cancelled caller | Preserves cancellation intent; re-raises `CancelledError` | Exactly 0 | **PASSED** |
-| **19** | Stage 1 fatal epoch error and cancelled caller | Preserves fatal `RuntimeEpochOwnershipError` with chained cancel | Exactly 0 | **PASSED** |
-| **20** | Stage 1 recoverable validation error and cancelled | Propagates cancellation; does not mask as ordinary blocked | Exactly 0 | **PASSED** |
-| **21** | Regression guard: zero connections during HTTP | Concurrent SQLite write succeeds during HTTP await | Exactly 1 | **PASSED** |
-| **22** | Regression guard: legacy interface intact | `TelegramLifecycleDeliveryService` unaffected | N/A | **PASSED** |
-| **23** | Regression guard: quarantine of 11 records | Historical records rejected; 0 calls; 0 DB mutations | Exactly 0 | **PASSED** |
-
-### Test Run Outcome
 ```
-tests\test_p0b3b1_telegram_outbox_protocol.py .......................    [100%]
-============================= 23 passed in 5.48s ==============================
+tests\test_p0b3b1_telegram_outbox_protocol.py .......................... [ 50%]
+..........................                                               [100%]
+============================= 52 passed in 10.25s =============================
 ```
 
----
-
-## 5. Regression Suite Verification
-
-Full regression test run executed against all existing isolated modules:
-
+### 4.2 Full Regression Suite Verification
 ```
-collected 100 items
-
 tests\test_p0a_event_loop_isolation.py ..................                [ 18%]
 tests\test_p0b1_lifecycle_isolation.py .............................     [ 47%]
 tests\test_p0b2_continuation_monitoring_isolation.py ................... [ 66%]
 .                                                                        [ 67%]
 tests\test_telegram_outbox_recovery.py ...................               [ 86%]
 tests\test_cmc_watch_recovery.py ..............                          [100%]
-
-============================ 100 passed in 24.28s =============================
+============================ 100 passed in 20.60s =============================
 ```
 
-Combined outbox test run:
-```
-tests\test_p0b3b1_telegram_outbox_protocol.py .......................    [ 54%]
-tests\test_telegram_outbox_recovery.py ...................               [100%]
-
-============================= 42 passed in 8.15s ==============================
-```
-
-- **Total Tests Passed**: **142**
-- **Regressions Introduced**: **0**
+Combined outbox & recovery tests:
+- Total protocol & regression tests: **152 passing**
+- Regressions introduced: **0**
 
 ---
 
-## 6. Files Modified
+## 5. Files Modified
 
-1. [`app/alerts/telegram_outbox_protocol.py`](file:///C:/CandleCraftDev/app/alerts/telegram_outbox_protocol.py): Hardened admission fencing, mandatory post-commit SQLite verification, transport outcome normalization, and cancellation precedence.
-2. [`tests/test_p0b3b1_telegram_outbox_protocol.py`](file:///C:/CandleCraftDev/tests/test_p0b3b1_telegram_outbox_protocol.py): 23 test scenarios covering all 20 hardening requirements plus 3 regression guards.
-3. [`docs/operations/CCI_P0B3B1_TELEGRAM_OUTBOX_PROTOCOL_HANDOFF.md`](file:///C:/CandleCraftDev/docs/operations/CCI_P0B3B1_TELEGRAM_OUTBOX_PROTOCOL_HANDOFF.md): Updated handoff report.
+1. [`app/alerts/telegram_outbox_protocol.py`](file:///C:/CandleCraftDev/app/alerts/telegram_outbox_protocol.py):
+   - Strict HTTP 200 requirement in `normalize_transport_outcome()`.
+   - Documented Phase P0B3B2 adapter obligation for `TelegramSender`.
+   - Distinct handling of fatal epoch errors vs ordinary public eligibility refusals.
+   - Stage 1 and Stage 3 bounded fencing preserving fatal error propagation even when caller is cancelled.
+   - Multipart-aware independent SQLite post-commit verification.
+2. [`tests/test_p0b3b1_telegram_outbox_protocol.py`](file:///C:/CandleCraftDev/tests/test_p0b3b1_telegram_outbox_protocol.py):
+   - 52 synthetic scenarios (22 baseline + 20 hardening + 10 evidence/fatal epoch).
+3. [`docs/operations/CCI_P0B3B1_TELEGRAM_OUTBOX_PROTOCOL_HANDOFF.md`](file:///C:/CandleCraftDev/docs/operations/CCI_P0B3B1_TELEGRAM_OUTBOX_PROTOCOL_HANDOFF.md):
+   - Reconciled documentation and verification report.
 
 ---
 
-## 7. Next Recommended Phase
+## 6. Next Recommended Phase
 
 **Phase P0B3B2 — Production Integration & Outer Context Manager Decomposition**:
-- Safely integrate `deliver_single_reserved_part` and `TelegramOutboxWorker` into `TelegramLifecycleDeliveryService.deliver_for_run`.
+- Construct the adapter function translating `TelegramSendResult` into verified `TelegramTransportOutcome`.
+- Integrate `TelegramOutboxWorker` and `deliver_single_reserved_part` into `TelegramLifecycleDeliveryService.deliver_for_run`.
 - Decompose the outer open repository context managers (`SQLiteTelegramAlertAttemptRepository`, `SQLiteSetupLifecycleRepository`) to eliminate event-loop connection holding.
-- Ensure end-to-end integration equivalence with zero production regressions.
+- Ensure zero production regressions, preserving all public delivery invariants.
