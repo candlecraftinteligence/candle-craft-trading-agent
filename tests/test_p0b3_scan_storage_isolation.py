@@ -15,6 +15,7 @@ import websockets
 from app.analytics.market_regime import default_market_regime_result
 from app.core.phase_profile import PhaseProfile
 from app.data.dtos import NA
+from app.lifecycle.eligibility import has_valid_trade_map, public_watchlist_eligible
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
@@ -1063,3 +1064,60 @@ def test_cancellation_during_recoverable_vs_fatal_scan_storage_failure(
 
     asyncio.run(_scenario())
 
+
+def test_no_changes_in_telegram_or_trading_eligibility(tmp_path: Path) -> None:
+    """Scan storage isolation must not mutate symbol trading eligibility, trade setups, or Telegram outbox state."""
+    db_path = tmp_path / "telegram_eligibility.db"
+    args, execution, summary = _make_watch_execution(
+        db_path,
+        run_id="run-tele-elig-001",
+        symbols=("BTCUSDT", "ETHUSDT"),
+    )
+
+    sym_results_before = [s.model_dump() for s in execution.result.results]
+    trade_maps_before = [has_valid_trade_map(s) for s in execution.result.results]
+    eligibility_before = [public_watchlist_eligible(s) for s in execution.result.results]
+    telegram_status_before = dict(execution.telegram_outbox_status)
+    telegram_summary_before = execution.telegram_delivery_summary
+
+    with sqlite3.connect(db_path) as conn:
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        outbox_tables = [t for t in tables if "outbox" in t or "telegram" in t]
+        outbox_counts_before = {
+            t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+            for t in outbox_tables
+        }
+
+    async def _run() -> str:
+        worker = LifecycleWorker()
+        try:
+            return await run_scan._store_watch_iteration_scan_run_isolated(
+                args,
+                worker=worker,
+                execution=execution,
+                summary=summary,
+                started_at="2026-04-20T12:00:00+00:00",
+                completed_at="2026-04-20T12:00:02+00:00",
+                runtime_sec=1.25,
+                command_used="python scripts/run_scan.py --watch --store-scan",
+            )
+        finally:
+            await worker.aclose()
+
+    run_id = asyncio.run(_run())
+    assert run_id == "run-tele-elig-001"
+
+    sym_results_after = [s.model_dump() for s in execution.result.results]
+    trade_maps_after = [has_valid_trade_map(s) for s in execution.result.results]
+    eligibility_after = [public_watchlist_eligible(s) for s in execution.result.results]
+    assert sym_results_after == sym_results_before
+    assert trade_maps_after == trade_maps_before
+    assert eligibility_after == eligibility_before
+
+    assert execution.telegram_outbox_status == telegram_status_before
+    assert execution.telegram_delivery_summary == telegram_summary_before
+
+    with sqlite3.connect(db_path) as conn:
+        for t, count_before in outbox_counts_before.items():
+            count_after = conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+            assert count_after == count_before
