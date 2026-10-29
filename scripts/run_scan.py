@@ -1399,6 +1399,8 @@ def _format_universe_header(universe: SymbolUniverse) -> str:
                 f"Ranks within boundary: {diagnostics.get('rank_within_boundary_count', 0)}",
                 f"Qualified cohort before exchange intersection: {diagnostics.get('qualified_cohort_size', 'N/A')}",
                 f"Qualified cohort limit: {diagnostics.get('qualified_cohort_limit', 'N/A')}",
+                f"Withheld unclassified or ambiguous: {diagnostics.get('withheld_unknown_count', 0)}",
+                f"Verified selected contracts: {diagnostics.get('selected_count', 0)}",
                 f"Binance crypto perpetual matches: {diagnostics.get('binance_perp_match_count', 0)}",
                 f"Ranks greater than N excluded: {diagnostics.get('rank_gt_n_excluded_count', 0)}",
                 f"Ambiguous tickers excluded: {diagnostics.get('ambiguous_symbol_count', 0)}",

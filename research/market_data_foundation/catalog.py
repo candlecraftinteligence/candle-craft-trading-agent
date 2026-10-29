@@ -549,7 +549,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "raw_fields": "id, symbol, rank, last_updated, quotes.USD.market_cap",
         "native_unit": "USD market cap in the provider methodology; raw rank integer",
         "normalized_unit": "SymbolUniverse raw rank map plus qualified_rank diagnostics",
-        "conversion": "qualified_rank after reviewed genuine classification and non-genuine exclusions. An unclassified identity inside the cohort window fails closed. Ambiguous tickers without a verified provider id are excluded. Qualified rank above the cohort is not refilled.",
+        "conversion": "conservative Top-100 boundary. Verified genuine assets inside it can be selected. Unclassified or identity-ambiguous assets consume a slot and are withheld. Qualified rank above the boundary is not refilled. An exact qualified rank is reported only when no withheld slot precedes that asset.",
         "timestamps": "provider payload does not become a candle time. generated_at is acquisition time.",
         "refresh": "each universe resolution; no rank cache on the strict path (cache_used false)",
         "history": "latest ranking payload",
@@ -564,9 +564,9 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/universe/symbol_universe.py", "line": 564, "contains": '"/tickers"'},
-            {"path": "app/universe/symbol_universe.py", "line": 512, "contains": "qualified_rank_above_cohort"},
-            {"path": "app/universe/symbol_universe.py", "line": 736, "contains": "STABLECOIN_BASES"},
+            {"path": "app/universe/symbol_universe.py", "line": 588, "contains": '"/tickers"'},
+            {"path": "app/universe/symbol_universe.py", "line": 514, "contains": "qualified_rank_above_cohort"},
+            {"path": "app/universe/symbol_universe.py", "line": 760, "contains": "STABLECOIN_BASES"},
         ),
     },
     {

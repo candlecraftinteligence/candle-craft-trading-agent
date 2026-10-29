@@ -11,8 +11,10 @@ exchange price unit and never rescale it.
 
 An asset is genuine only with an explicit classification, a reviewed provider
 id, or provider category metadata that identifies the asset itself. Sector
-tags and names are not that evidence. An unclassified identity inside the
-window needed to fill the cohort fails new discovery closed.
+tags and names are not that evidence. An unclassified or identity-ambiguous
+asset consumes one conservative Top-100 slot and is not admitted. It does not
+abort verified discovery. A malformed, gapped, stale, or incomplete ranking
+still fails closed.
 """
 
 from __future__ import annotations
@@ -337,7 +339,9 @@ class QualifiedAsset:
     provider_symbol: str
     provider_name: str
     raw_rank: int
-    qualified_rank: int
+    qualified_rank: int | None
+    qualified_rank_lower: int
+    qualified_rank_upper: int
     market_cap: Decimal
     last_updated: str
 
@@ -363,6 +367,8 @@ class CanonicalCohort:
     invalid_symbol_count: int
     qualified_rank_above_cohort_count: int
     exclusion_counts: Mapping[str, int]
+    withheld: tuple[QualificationExclusion, ...]
+    potential_member_count: int
     provider_last_updated_min: str | None
     provider_last_updated_max: str | None
 
@@ -387,7 +393,12 @@ def qualify_canonical_cohort(
     cohort_size: int,
     acquired_at: datetime,
 ) -> CanonicalCohort:
-    """Return the genuine cohort or fail closed on a snapshot that cannot prove it."""
+    """Return verified genuine members inside the conservative boundary.
+
+    Non-genuine assets do not consume a slot. Unclassified and identity-ambiguous
+    assets consume a slot and are withheld. The walk stops at ``cohort_size``
+    potential members and does not backfill past that boundary.
+    """
 
     if cohort_size < 1 or cohort_size > CANONICAL_QUALIFIED_COHORT_LIMIT:
         raise CanonicalUniverseError(
@@ -412,15 +423,20 @@ def qualify_canonical_cohort(
 
     cohort: list[QualifiedAsset] = []
     exclusions: list[QualificationExclusion] = []
+    withheld: list[QualificationExclusion] = []
     exclusion_counts: dict[str, int] = {category: 0 for category in sorted(EXCLUSION_CATEGORIES)}
     expected_rank = 1
     provider_max_rank = ranked[-1][0]
     above_cohort = 0
+    potential = 0
+    genuine_before = 0
+    unknown_before = 0
     window_updates: list[datetime] = []
 
     for rank, raw_asset in ranked:
-        if len(cohort) >= cohort_size:
-            if _category_for_asset(raw_asset) == CATEGORY_GENUINE and _provider_symbol(raw_asset):
+        if potential >= cohort_size:
+            kind, _category = _asset_membership(raw_asset)
+            if kind == "genuine" and _provider_symbol(raw_asset):
                 above_cohort += 1
             continue
         if rank < expected_rank:
@@ -439,13 +455,8 @@ def qualify_canonical_cohort(
         market_cap = _require_market_cap(raw_asset, provider_id=provider_id)
         updated = _require_fresh_timestamp(raw_asset, provider_id=provider_id, acquired_at=acquired_at)
         window_updates.append(updated)
-        category = _category_for_asset(raw_asset)
-        if category == CATEGORY_UNCLASSIFIED:
-            raise CanonicalUniverseError(
-                "universe_error: CoinPaprika market-cap source returned unclassified identity "
-                f"(provider id {provider_id} has no reviewed cryptocurrency classification)"
-            )
-        if category != CATEGORY_GENUINE:
+        kind, category = _asset_membership(raw_asset)
+        if kind == "excluded":
             exclusion_counts[category] = exclusion_counts.get(category, 0) + 1
             exclusions.append(
                 QualificationExclusion(
@@ -456,23 +467,40 @@ def qualify_canonical_cohort(
                 )
             )
             continue
+        potential += 1
+        if kind == "withheld":
+            unknown_before += 1
+            withheld.append(
+                QualificationExclusion(
+                    provider_id=provider_id,
+                    provider_symbol=provider_symbol,
+                    raw_rank=rank,
+                    category=category,
+                )
+            )
+            continue
+        lower = genuine_before + 1
+        upper = genuine_before + unknown_before + 1
         cohort.append(
             QualifiedAsset(
                 provider_id=provider_id,
                 provider_symbol=provider_symbol,
                 provider_name=_provider_name(raw_asset),
                 raw_rank=rank,
-                qualified_rank=len(cohort) + 1,
+                qualified_rank=lower if lower == upper else None,
+                qualified_rank_lower=lower,
+                qualified_rank_upper=upper,
                 market_cap=market_cap,
                 last_updated=_timestamp_text(updated),
             )
         )
+        genuine_before += 1
 
-    if len(cohort) < cohort_size:
+    if potential < cohort_size:
         last_rank = ranked[-1][0]
         raise CanonicalUniverseError(
             "universe_error: CoinPaprika market-cap source returned incomplete ranking "
-            f"(highest valid rank {last_rank} produced {len(cohort)} qualified assets "
+            f"(highest valid rank {last_rank} produced {potential} potential qualified members "
             f"< requested {cohort_size})"
         )
     _require_complete_symbol_identities(provider_assets, cohort)
@@ -489,6 +517,8 @@ def qualify_canonical_cohort(
         invalid_symbol_count=invalid_symbol_count,
         qualified_rank_above_cohort_count=above_cohort,
         exclusion_counts=exclusion_counts,
+        withheld=tuple(withheld),
+        potential_member_count=potential,
         provider_last_updated_min=_timestamp_text(min(window_updates)) if window_updates else None,
         provider_last_updated_max=_timestamp_text(max(window_updates)) if window_updates else None,
     )
@@ -549,16 +579,39 @@ def _require_complete_symbol_identities(
 
 
 def _genuine_symbol_counts(provider_assets: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Count identities that block a symbol-only contract match.
+
+    Verified genuine rows and withheld rows both count. A confident non-genuine
+    row does not. A verified provider-id mapping can still select its contract.
+    """
+
     counts: dict[str, set[str]] = defaultdict(set)
     for raw_asset in provider_assets:
         provider_symbol = _provider_symbol(raw_asset)
         provider_id = _provider_id(raw_asset)
         if not provider_symbol or provider_id is None:
             continue
-        if _category_for_asset(raw_asset) != CATEGORY_GENUINE:
+        kind, _category = _asset_membership(raw_asset)
+        if kind == "excluded":
             continue
         counts[provider_symbol].add(provider_id)
     return {symbol: len(identities) for symbol, identities in counts.items()}
+
+
+def _asset_membership(raw_asset: Mapping[str, Any]) -> tuple[str, str]:
+    """Classify one row without letting asset-level uncertainty abort the snapshot."""
+
+    try:
+        category = _category_for_asset(raw_asset)
+    except CanonicalUniverseError as exc:
+        if "ambiguous identity evidence" in str(exc):
+            return "withheld", "ambiguous"
+        raise
+    if category == CATEGORY_UNCLASSIFIED:
+        return "withheld", CATEGORY_UNCLASSIFIED
+    if category == CATEGORY_GENUINE:
+        return "genuine", CATEGORY_GENUINE
+    return "excluded", category
 
 
 def _category_for_asset(raw_asset: Mapping[str, Any]) -> str:

@@ -480,7 +480,7 @@ def build_symbol_universe_from_market_caps(
     diagnostics = {
         "provider": COINPAPRIKA_MARKET_CAP_SOURCE,
         "exchange_availability_source": BINANCE_USDM_EXCHANGE_INFO_SOURCE,
-        "qualification_policy": "canonical_genuine_crypto_top_n",
+        "qualification_policy": "conservative_genuine_crypto_top_n",
         "acquisition_timestamp": acquired_at.isoformat().replace("+00:00", "Z"),
         "canonical_qualified_cohort_limit": CANONICAL_QUALIFIED_COHORT_LIMIT,
         "qualified_cohort_limit": min(universe_size, CANONICAL_QUALIFIED_COHORT_LIMIT),
@@ -492,8 +492,10 @@ def build_symbol_universe_from_market_caps(
         "provider_asset_count": cohort.provider_asset_count,
         "valid_rank_count": cohort.valid_rank_count,
         "provider_max_rank": cohort.provider_max_rank,
-        "rank_within_boundary_count": len(cohort.cohort),
+        "rank_within_boundary_count": cohort.potential_member_count,
         "qualified_cohort_size": len(cohort.cohort),
+        "potential_member_count": cohort.potential_member_count,
+        "withheld_unknown_count": len(cohort.withheld),
         "binance_perp_match_count": len(selected),
         "selected_count": len(selected),
         "final_universe_count": len(selected),
@@ -510,7 +512,18 @@ def build_symbol_universe_from_market_caps(
             **{f"qualification_{category}": count for category, count in cohort.exclusion_counts.items()},
             **rejection_counts,
             "qualified_rank_above_cohort": cohort.qualified_rank_above_cohort_count,
+            "withheld_unknown": len(cohort.withheld),
         },
+        "withheld_identities": [
+            {
+                "provider_id": item.provider_id,
+                "provider_symbol": item.provider_symbol,
+                "raw_rank": item.raw_rank,
+                "category": item.category,
+            }
+            for item in cohort.withheld[:100]
+        ],
+        "withheld_identities_truncated": len(cohort.withheld) > 100,
         "qualification_exclusions": [
             {
                 "provider_id": item.provider_id,
@@ -526,7 +539,18 @@ def build_symbol_universe_from_market_caps(
         "qualified_membership": [
             _membership_diagnostic(asset, match) for asset, match in selected
         ],
-        "qualified_rank_by_symbol": {match.exchange_symbol: asset.qualified_rank for asset, match in selected},
+        "qualified_rank_by_symbol": {
+            match.exchange_symbol: asset.qualified_rank
+            for asset, match in selected
+            if asset.qualified_rank is not None
+        },
+        "qualified_rank_bounds_by_symbol": {
+            match.exchange_symbol: {
+                "lower": asset.qualified_rank_lower,
+                "upper": asset.qualified_rank_upper,
+            }
+            for asset, match in selected
+        },
         "provider_failure": False,
         "cache_used": False,
         "cache_age": None,
@@ -798,7 +822,9 @@ def _select_qualified_perpetuals(
             rejections.append(_identity_rejection(asset, "exchange_symbol_collision", match=match))
             continue
         chosen[match.exchange_symbol] = (asset, match)
-    selected = tuple(sorted(chosen.values(), key=lambda item: (item[0].qualified_rank, item[1].exchange_symbol)))
+    selected = tuple(
+        sorted(chosen.values(), key=lambda item: (item[0].qualified_rank_upper, item[0].raw_rank, item[1].exchange_symbol))
+    )
     return selected, rejections
 
 
@@ -898,6 +924,8 @@ def _membership_diagnostic(asset: QualifiedAsset, match: _ExchangeIdentityMatch)
         "provider_name": asset.provider_name,
         "raw_rank": asset.raw_rank,
         "qualified_rank": asset.qualified_rank,
+        "qualified_rank_lower": asset.qualified_rank_lower,
+        "qualified_rank_upper": asset.qualified_rank_upper,
         "market_cap_usd": _decimal_json(asset.market_cap),
         "last_updated": asset.last_updated,
         "exchange_symbol": match.exchange_symbol,
