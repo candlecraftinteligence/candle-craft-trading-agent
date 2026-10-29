@@ -39,14 +39,30 @@ from tests.runtime_epoch_support import SYNTHETIC_IDENTITY, bootstrap_operationa
 GENERATED_AT = "2026-08-22T00:00:00Z"
 
 
-def _asset(rank: int, *, symbol: str | None = None, asset_id: str | None = None) -> dict:
+def _asset(
+    rank: int,
+    *,
+    symbol: str | None = None,
+    asset_id: str | None = None,
+    last_updated: str | None = GENERATED_AT,
+    qualification_class: str | None = "genuine",
+    classified: bool = True,
+    name: str | None = None,
+) -> dict:
     base_symbol = symbol or f"A{rank}"
-    return {
+    payload = {
         "id": asset_id or f"asset-{rank}",
         "symbol": base_symbol,
+        "name": name or base_symbol,
         "rank": rank,
+        "last_updated": last_updated,
         "quotes": {"USD": {"market_cap": str(1_000_000 - rank)}},
     }
+    if classified and qualification_class is not None:
+        payload["qualification_class"] = qualification_class
+    if last_updated is None:
+        del payload["last_updated"]
+    return payload
 
 
 def _ticker(base_symbol: str, *, quote_volume: str = "100") -> dict:
@@ -136,7 +152,7 @@ def _lifecycle_record(symbol: str, state: SetupLifecycleState, *, lifecycle_id: 
     )
 
 
-def test_top_50_is_an_absolute_global_rank_boundary() -> None:
+def test_qualified_top_50_stops_at_the_cohort_boundary() -> None:
     universe = _strict_resolution(
         _ranked_assets(70),
         _bases(range(1, 71)),
@@ -149,7 +165,7 @@ def test_top_50_is_an_absolute_global_rank_boundary() -> None:
     assert universe.diagnostics["rank_gt_n_excluded_count"] == 20
 
 
-def test_top_100_is_an_absolute_global_rank_boundary() -> None:
+def test_qualified_top_100_stops_at_the_cohort_boundary() -> None:
     universe = _strict_resolution(
         _ranked_assets(124),
         _bases(range(1, 125)),
@@ -228,7 +244,7 @@ def test_max_symbols_is_only_a_cap(
     assert resolution.universe.diagnostics["final_universe_count"] == expected_count
 
 
-def test_generic_n_37_uses_the_same_absolute_rank_rule() -> None:
+def test_generic_n_37_uses_the_same_qualified_rank_rule() -> None:
     universe = _strict_resolution(
         _ranked_assets(45),
         _bases(range(1, 46)),
@@ -249,24 +265,20 @@ def test_truncated_provider_ranking_fails_instead_of_under_scanning() -> None:
         )
 
 
-def test_missing_malformed_and_non_positive_ranks_are_excluded() -> None:
+def test_missing_malformed_and_non_positive_ranks_fail_closed() -> None:
     provider_assets = [
-        {"id": "missing", "symbol": "MISS", "rank": None},
-        {"id": "malformed", "symbol": "BAD", "rank": "not-a-rank"},
-        {"id": "zero", "symbol": "ZERO", "rank": 0},
+        {"id": "missing", "symbol": "MISS", "rank": None, "last_updated": GENERATED_AT},
+        {"id": "malformed", "symbol": "BAD", "rank": "not-a-rank", "last_updated": GENERATED_AT},
+        {"id": "zero", "symbol": "ZERO", "rank": 0, "last_updated": GENERATED_AT},
         _asset(2, symbol="GOOD", asset_id="good"),
         _asset(4, symbol="OVER", asset_id="over"),
     ]
-    universe = _strict_resolution(
-        provider_assets,
-        ["MISS", "BAD", "ZERO", "GOOD", "OVER"],
-        universe_size=2,
-    )
-
-    assert universe.resolved_symbols == ("GOODUSDT",)
-    assert universe.diagnostics["missing_rank_count"] == 1
-    assert universe.diagnostics["invalid_rank_count"] == 2
-    assert universe.diagnostics["rank_gt_n_excluded_count"] == 1
+    with pytest.raises(UniverseResolutionError, match="incomplete ranking"):
+        _strict_resolution(
+            provider_assets,
+            ["MISS", "BAD", "ZERO", "GOOD", "OVER"],
+            universe_size=2,
+        )
 
 
 def test_duplicate_provider_ticker_is_rejected_as_ambiguous() -> None:
@@ -312,20 +324,25 @@ def test_exchange_contract_metadata_rejects_non_crypto_and_non_perpetual_product
 
 def test_resolution_order_is_deterministic_for_the_same_provider_assets() -> None:
     provider_assets = [
-        _asset(5, symbol="FIVE"),
+        _asset(2, symbol="TWO"),
         _asset(1, symbol="ONE"),
         _asset(3, symbol="THREE"),
     ]
-    matched = ["ONE", "THREE", "FIVE"]
+    matched = ["ONE", "TWO", "THREE"]
 
-    first = _strict_resolution(provider_assets, matched, universe_size=5)
-    second = _strict_resolution(list(reversed(provider_assets)), list(reversed(matched)), universe_size=5)
+    first = _strict_resolution(provider_assets, matched, universe_size=3)
+    second = _strict_resolution(list(reversed(provider_assets)), list(reversed(matched)), universe_size=3)
 
     assert first.resolved_symbols == second.resolved_symbols == (
         "ONEUSDT",
+        "TWOUSDT",
         "THREEUSDT",
-        "FIVEUSDT",
     )
+    assert first.diagnostics["qualified_rank_by_symbol"] == {
+        "ONEUSDT": 1,
+        "TWOUSDT": 2,
+        "THREEUSDT": 3,
+    }
 
 
 @pytest.mark.parametrize(

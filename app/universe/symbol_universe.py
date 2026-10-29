@@ -11,6 +11,15 @@ from typing import Any
 import httpx
 
 from app.data.exchange_clients.binance_futures import BinanceFuturesClient
+from app.universe.canonical_qualification import (
+    CANONICAL_QUALIFIED_COHORT_LIMIT,
+    EXCHANGE_CONTRACT_PRICE_BASIS,
+    VERIFIED_CONTRACT_MAPPINGS,
+    CanonicalUniverseError,
+    QualifiedAsset,
+    acquired_timestamp,
+    qualify_canonical_cohort,
+)
 
 MANUAL_UNIVERSE_MODE = "manual"
 BINANCE_USDT_PERP_TOP_VOLUME_MODE = "binance_usdt_perp_top_volume"
@@ -31,7 +40,9 @@ UNIVERSE_LABELS = {
     MANUAL_UNIVERSE_MODE: "Manual symbols",
     BINANCE_USDT_PERP_TOP_VOLUME_MODE: "Top Binance USDT perpetuals by quote volume",
     BINANCE_USDT_PERP_TOP_TRADABLE_MODE: "Top Binance USDT perpetuals by quote volume/tradability",
-    BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE: "Global cryptocurrency market-cap Top N available as Binance USDT perpetuals",
+    BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE: (
+        "Qualified genuine-cryptocurrency market-cap cohort available as Binance USDT perpetuals"
+    ),
 }
 
 STABLECOIN_BASES = frozenset(("USDC", "USDT", "DAI", "FDUSD", "TUSD", "USDE", "USDS"))
@@ -53,11 +64,24 @@ class UniverseMarketCapSymbol:
 
 
 @dataclass(frozen=True)
-class _RankedProviderAsset:
-    raw_asset: Mapping[str, Any]
-    base_symbol: str
-    identity: str
-    rank: int
+class _ContractEvidence:
+    symbol: str
+    base_asset: str
+    tick_size: str | None
+    step_size: str | None
+    stated_multiplier: int | None
+    stated_multiplier_invalid: bool
+
+
+@dataclass(frozen=True)
+class _ExchangeIdentityMatch:
+    exchange_symbol: str
+    exchange_base_asset: str
+    contract_multiplier: int
+    price_quantity_basis: str
+    collision_status: str
+    tick_size: str | None
+    step_size: str | None
 
 
 @dataclass(frozen=True)
@@ -113,6 +137,15 @@ class SymbolUniverse:
         diagnostics = dict(self.diagnostics)
         if diagnostics or diagnostic_updates:
             diagnostics["final_universe_count"] = len(resolved)
+        membership = diagnostics.get("qualified_membership")
+        if isinstance(membership, list):
+            allowed = set(resolved)
+            diagnostics["qualified_membership"] = [
+                item
+                for item in membership
+                if isinstance(item, Mapping) and item.get("exchange_symbol") in allowed
+            ]
+            diagnostics["selected_count"] = len(diagnostics["qualified_membership"])
         if diagnostic_updates:
             diagnostics.update(diagnostic_updates)
         return replace(
@@ -402,106 +435,122 @@ def build_symbol_universe_from_market_caps(
             "universe_error: Binance USDT perpetual ticker source contained no usable USDT tickers"
         )
     quote_volume_by_symbol = {item.symbol: item.quote_volume for item in binance_tickers}
-    binance_perpetuals, contract_diagnostics = _binance_crypto_usdt_perpetual_symbols(exchange_info)
-    available_binance_symbols = binance_perpetuals.intersection(quote_volume_by_symbol)
-
-    identities_by_base: dict[str, set[str]] = {}
-    ranked_by_identity: dict[str, _RankedProviderAsset] = {}
-    missing_rank_count = 0
-    invalid_rank_count = 0
-    invalid_symbol_count = 0
-    for index, raw_asset in enumerate(provider_assets):
-        base_symbol = _market_cap_base_symbol(raw_asset)
-        if not base_symbol:
-            invalid_symbol_count += 1
-        identity = _market_cap_asset_identity(raw_asset, index=index)
-        if base_symbol:
-            identities_by_base.setdefault(base_symbol, set()).add(identity)
-
-        rank, rank_status = _market_cap_rank_with_status(raw_asset)
-        if rank_status == "missing":
-            missing_rank_count += 1
-            continue
-        if rank_status == "invalid" or rank is None:
-            invalid_rank_count += 1
-            continue
-        if not base_symbol:
-            continue
-
-        candidate = _RankedProviderAsset(
-            raw_asset=raw_asset,
-            base_symbol=base_symbol,
-            identity=identity,
-            rank=rank,
+    observed_volumes = _observed_usdt_quote_volumes(tickers)
+    contracts, contract_diagnostics = _binance_crypto_usdt_perpetual_symbols(exchange_info)
+    # A parser defect here is a programming error, not a provider outage.
+    for raw_asset in provider_assets:
+        _market_cap_usd(raw_asset)
+    try:
+        acquired_at = acquired_timestamp(generated_at)
+        cohort = qualify_canonical_cohort(
+            provider_assets,
+            cohort_size=min(universe_size, CANONICAL_QUALIFIED_COHORT_LIMIT),
+            acquired_at=acquired_at,
         )
-        existing = ranked_by_identity.get(identity)
-        if existing is None or (candidate.rank, candidate.base_symbol) < (existing.rank, existing.base_symbol):
-            ranked_by_identity[identity] = candidate
+    except CanonicalUniverseError as exc:
+        raise UniverseResolutionError(str(exc)) from exc
 
-    if not ranked_by_identity:
-        raise UniverseResolutionError(
-            "universe_error: CoinPaprika market-cap source contained no valid ranked cryptocurrency assets"
-        )
-    provider_max_rank = max(asset.rank for asset in ranked_by_identity.values())
-    if provider_max_rank < universe_size:
-        raise UniverseResolutionError(
-            "universe_error: CoinPaprika market-cap source returned incomplete ranking "
-            f"(highest valid rank {provider_max_rank} < requested {universe_size})"
-        )
-
-    ambiguous_bases = {
-        base_symbol for base_symbol, identities in identities_by_base.items() if len(identities) > 1
-    }
-    ranked_candidates: dict[str, UniverseMarketCapSymbol] = {}
-    rank_gt_n_excluded_count = 0
-    rank_within_boundary_count = 0
-    no_binance_perp_count = 0
-    ambiguous_within_boundary: set[str] = set()
-    for provider_asset in ranked_by_identity.values():
-        if provider_asset.rank > universe_size:
-            rank_gt_n_excluded_count += 1
-            continue
-        rank_within_boundary_count += 1
-        if provider_asset.base_symbol in ambiguous_bases:
-            ambiguous_within_boundary.add(provider_asset.base_symbol)
-            continue
-
-        symbol = f"{provider_asset.base_symbol}USDT"
-        if symbol not in available_binance_symbols:
-            no_binance_perp_count += 1
-            continue
-        candidate = UniverseMarketCapSymbol(
-            symbol=symbol,
-            rank=provider_asset.rank,
-            market_cap=_market_cap_usd(provider_asset.raw_asset),
-        )
-        existing = ranked_candidates.get(symbol)
-        if existing is None or candidate.rank < existing.rank:
-            ranked_candidates[symbol] = candidate
-
-    selected = tuple(sorted(ranked_candidates.values(), key=lambda item: (item.rank, item.symbol)))
+    selected, identity_rejections = _select_qualified_perpetuals(
+        cohort.cohort,
+        contracts=contracts,
+        eligible_symbol_counts=cohort.eligible_symbol_counts,
+        observed_volumes=observed_volumes,
+        admissible_volumes=quote_volume_by_symbol,
+        minimum_volume=minimum_volume,
+    )
     if not selected:
         raise UniverseResolutionError(
             "universe_error: strict market-cap discovery intersection is empty"
         )
+    ambiguous_symbols = sorted(
+        {
+            str(item["provider_symbol"])
+            for item in identity_rejections
+            if item.get("reason") == "unresolved_ambiguity"
+        }
+    )
+    rejection_counts: dict[str, int] = {}
+    for item in identity_rejections:
+        reason = str(item.get("reason") or "")
+        if reason:
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+    no_binance_perp_count = rejection_counts.get("no_binance_perp", 0) + rejection_counts.get(
+        "verified_contract_mismatch", 0
+    )
     diagnostics = {
         "provider": COINPAPRIKA_MARKET_CAP_SOURCE,
         "exchange_availability_source": BINANCE_USDM_EXCHANGE_INFO_SOURCE,
+        "qualification_policy": "conservative_genuine_crypto_top_n",
+        "acquisition_timestamp": acquired_at.isoformat().replace("+00:00", "Z"),
+        "canonical_qualified_cohort_limit": CANONICAL_QUALIFIED_COHORT_LIMIT,
+        "qualified_cohort_limit": min(universe_size, CANONICAL_QUALIFIED_COHORT_LIMIT),
+        "ranking_max_age_seconds": 3600,
+        "provider_last_updated_min": cohort.provider_last_updated_min,
+        "provider_last_updated_max": cohort.provider_last_updated_max,
         "requested_universe_size": universe_size,
         "requested_max_symbols": None,
-        "provider_asset_count": len(provider_assets),
-        "valid_rank_count": len(ranked_by_identity),
-        "provider_max_rank": provider_max_rank,
-        "rank_within_boundary_count": rank_within_boundary_count,
+        "provider_asset_count": cohort.provider_asset_count,
+        "valid_rank_count": cohort.valid_rank_count,
+        "provider_max_rank": cohort.provider_max_rank,
+        "rank_within_boundary_count": cohort.potential_member_count,
+        "qualified_cohort_size": len(cohort.cohort),
+        "potential_member_count": cohort.potential_member_count,
+        "withheld_unknown_count": len(cohort.withheld),
         "binance_perp_match_count": len(selected),
+        "selected_count": len(selected),
         "final_universe_count": len(selected),
-        "rank_gt_n_excluded_count": rank_gt_n_excluded_count,
-        "missing_rank_count": missing_rank_count,
-        "invalid_rank_count": invalid_rank_count,
-        "invalid_symbol_count": invalid_symbol_count,
+        "rank_gt_n_excluded_count": cohort.qualified_rank_above_cohort_count,
+        "missing_rank_count": cohort.missing_rank_count,
+        "invalid_rank_count": cohort.invalid_rank_count,
+        "invalid_symbol_count": cohort.invalid_symbol_count,
         "no_binance_perp_count": no_binance_perp_count,
-        "ambiguous_symbol_count": len(ambiguous_within_boundary),
-        "ambiguous_symbols": sorted(ambiguous_within_boundary),
+        "below_min_quote_volume_count": rejection_counts.get("below_min_quote_volume", 0),
+        "ambiguous_symbol_count": len(ambiguous_symbols),
+        "ambiguous_symbols": ambiguous_symbols,
+        "exclusion_counts": dict(cohort.exclusion_counts),
+        "rejected_counts": {
+            **{f"qualification_{category}": count for category, count in cohort.exclusion_counts.items()},
+            **rejection_counts,
+            "qualified_rank_above_cohort": cohort.qualified_rank_above_cohort_count,
+            "withheld_unknown": len(cohort.withheld),
+        },
+        "withheld_identities": [
+            {
+                "provider_id": item.provider_id,
+                "provider_symbol": item.provider_symbol,
+                "raw_rank": item.raw_rank,
+                "category": item.category,
+            }
+            for item in cohort.withheld[:100]
+        ],
+        "withheld_identities_truncated": len(cohort.withheld) > 100,
+        "qualification_exclusions": [
+            {
+                "provider_id": item.provider_id,
+                "provider_symbol": item.provider_symbol,
+                "raw_rank": item.raw_rank,
+                "category": item.category,
+            }
+            for item in cohort.exclusions[:200]
+        ],
+        "qualification_exclusions_truncated": len(cohort.exclusions) > 200,
+        "identity_rejections": identity_rejections[:100],
+        "identity_rejections_truncated": len(identity_rejections) > 100,
+        "qualified_membership": [
+            _membership_diagnostic(asset, match) for asset, match in selected
+        ],
+        "qualified_rank_by_symbol": {
+            match.exchange_symbol: asset.qualified_rank
+            for asset, match in selected
+            if asset.qualified_rank is not None
+        },
+        "qualified_rank_bounds_by_symbol": {
+            match.exchange_symbol: {
+                "lower": asset.qualified_rank_lower,
+                "upper": asset.qualified_rank_upper,
+            }
+            for asset, match in selected
+        },
         "provider_failure": False,
         "cache_used": False,
         "cache_age": None,
@@ -511,16 +560,16 @@ def build_symbol_universe_from_market_caps(
     return SymbolUniverse(
         mode=BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
         requested_size=universe_size,
-        resolved_symbols=tuple(item.symbol for item in selected),
+        resolved_symbols=tuple(match.exchange_symbol for _asset, match in selected),
         excluded_symbols=_dedupe(excluded),
         source=COINPAPRIKA_MARKET_CAP_SOURCE,
-        generated_at=generated_at or _utc_now_iso(),
+        generated_at=acquired_at.isoformat().replace("+00:00", "Z"),
         min_quote_volume=minimum_volume,
-        quote_volume_by_symbol={item.symbol: quote_volume_by_symbol[item.symbol] for item in selected},
-        market_cap_rank_by_symbol={item.symbol: item.rank for item in selected},
-        market_cap_by_symbol={
-            item.symbol: item.market_cap for item in selected if item.market_cap is not None
+        quote_volume_by_symbol={
+            match.exchange_symbol: quote_volume_by_symbol[match.exchange_symbol] for _asset, match in selected
         },
+        market_cap_rank_by_symbol={match.exchange_symbol: asset.raw_rank for asset, match in selected},
+        market_cap_by_symbol={match.exchange_symbol: asset.market_cap for asset, match in selected},
         diagnostics=diagnostics,
     )
 
@@ -658,7 +707,7 @@ def _require_market_cap_ticker_payload(tickers: object) -> None:
 
 def _binance_crypto_usdt_perpetual_symbols(
     exchange_info: Mapping[str, Any] | None,
-) -> tuple[set[str], dict[str, Any]]:
+) -> tuple[dict[str, _ContractEvidence], dict[str, Any]]:
     # Ticker presence is not contract membership. Strict discovery requires the payload.
     if not isinstance(exchange_info, Mapping):
         raise UniverseResolutionError(
@@ -678,7 +727,7 @@ def _binance_crypto_usdt_perpetual_symbols(
             "universe_error: Binance exchange-info source returned malformed response"
         )
 
-    symbols: set[str] = set()
+    symbols: dict[str, _ContractEvidence] = {}
     non_crypto_count = 0
     non_perpetual_count = 0
     non_trading_count = 0
@@ -711,7 +760,15 @@ def _binance_crypto_usdt_perpetual_symbols(
         if base_asset in STABLECOIN_BASES or _is_leveraged_token_base(base_asset):
             policy_excluded_count += 1
             continue
-        symbols.add(symbol)
+        stated_multiplier, stated_multiplier_invalid = _stated_contract_multiplier(raw_contract)
+        symbols[symbol] = _ContractEvidence(
+            symbol=symbol,
+            base_asset=base_asset,
+            tick_size=_filter_text(raw_contract, "PRICE_FILTER", "tickSize"),
+            step_size=_filter_text(raw_contract, "LOT_SIZE", "stepSize"),
+            stated_multiplier=stated_multiplier,
+            stated_multiplier_invalid=stated_multiplier_invalid,
+        )
 
     if not symbols:
         raise UniverseResolutionError(
@@ -727,6 +784,215 @@ def _binance_crypto_usdt_perpetual_symbols(
         "malformed_contract_excluded_count": malformed_count,
         "existing_crypto_policy_excluded_count": policy_excluded_count,
     }
+
+
+def _select_qualified_perpetuals(
+    cohort: Sequence[QualifiedAsset],
+    *,
+    contracts: Mapping[str, _ContractEvidence],
+    eligible_symbol_counts: Mapping[str, int],
+    observed_volumes: Mapping[str, Decimal],
+    admissible_volumes: Mapping[str, Decimal],
+    minimum_volume: Decimal,
+) -> tuple[tuple[tuple[QualifiedAsset, _ExchangeIdentityMatch], ...], list[dict[str, Any]]]:
+    """Intersect the qualified cohort with admissible contracts. Never backfill."""
+
+    chosen: dict[str, tuple[QualifiedAsset, _ExchangeIdentityMatch]] = {}
+    rejections: list[dict[str, Any]] = []
+    for asset in cohort:
+        match, reason = _match_qualified_identity(
+            asset,
+            contracts=contracts,
+            eligible_symbol_counts=eligible_symbol_counts,
+        )
+        if match is None:
+            rejections.append(_identity_rejection(asset, reason or "no_binance_perp"))
+            continue
+        if match.exchange_symbol not in admissible_volumes:
+            observed = observed_volumes.get(match.exchange_symbol)
+            volume_reason = (
+                "below_min_quote_volume"
+                if observed is not None and observed < minimum_volume
+                else "no_binance_perp"
+            )
+            rejections.append(_identity_rejection(asset, volume_reason, match=match))
+            continue
+        incumbent = chosen.get(match.exchange_symbol)
+        if incumbent is not None:
+            rejections.append(_identity_rejection(asset, "exchange_symbol_collision", match=match))
+            continue
+        chosen[match.exchange_symbol] = (asset, match)
+    selected = tuple(
+        sorted(chosen.values(), key=lambda item: (item[0].qualified_rank_upper, item[0].raw_rank, item[1].exchange_symbol))
+    )
+    return selected, rejections
+
+
+def _match_qualified_identity(
+    asset: QualifiedAsset,
+    *,
+    contracts: Mapping[str, _ContractEvidence],
+    eligible_symbol_counts: Mapping[str, int],
+) -> tuple[_ExchangeIdentityMatch | None, str | None]:
+    collision_count = eligible_symbol_counts.get(asset.provider_symbol, 1)
+    verified = VERIFIED_CONTRACT_MAPPINGS.get(asset.provider_id)
+    if verified is not None:
+        if verified.provider_symbol != asset.provider_symbol:
+            return None, "identity_mapping_rejected"
+        contract = contracts.get(verified.exchange_symbol)
+        if contract is None or contract.base_asset != verified.exchange_base_asset:
+            return None, "verified_contract_mismatch"
+        if not _multiplier_matches_contract(
+            verified.contract_multiplier,
+            verified.exchange_base_asset,
+            verified.provider_symbol,
+            contract,
+        ):
+            return None, "invalid_multiplier"
+        if verified.price_quantity_basis != EXCHANGE_CONTRACT_PRICE_BASIS:
+            return None, "invalid_multiplier"
+        status = "verified_disambiguation" if collision_count > 1 else "verified_unique"
+        return _identity_match(contract, verified.contract_multiplier, status), None
+    if collision_count > 1:
+        return None, "unresolved_ambiguity"
+    contract = contracts.get(f"{asset.provider_symbol}USDT")
+    if contract is None or contract.base_asset != asset.provider_symbol:
+        return None, "no_binance_perp"
+    if contract.stated_multiplier_invalid or (
+        contract.stated_multiplier is not None and contract.stated_multiplier != 1
+    ):
+        return None, "invalid_multiplier"
+    return _identity_match(contract, 1, "unique"), None
+
+
+def _multiplier_matches_contract(
+    contract_multiplier: int,
+    exchange_base_asset: str,
+    provider_symbol: str,
+    contract: _ContractEvidence,
+) -> bool:
+    if contract_multiplier < 1:
+        return False
+    if contract_multiplier == 1 and exchange_base_asset != provider_symbol:
+        return False
+    if contract_multiplier != 1 and exchange_base_asset != f"{contract_multiplier}{provider_symbol}":
+        return False
+    if contract.stated_multiplier_invalid:
+        return False
+    if contract.stated_multiplier is not None and contract.stated_multiplier != contract_multiplier:
+        return False
+    return True
+
+
+def _identity_match(
+    contract: _ContractEvidence,
+    contract_multiplier: int,
+    collision_status: str,
+) -> _ExchangeIdentityMatch:
+    return _ExchangeIdentityMatch(
+        exchange_symbol=contract.symbol,
+        exchange_base_asset=contract.base_asset,
+        contract_multiplier=contract_multiplier,
+        price_quantity_basis=EXCHANGE_CONTRACT_PRICE_BASIS,
+        collision_status=collision_status,
+        tick_size=contract.tick_size,
+        step_size=contract.step_size,
+    )
+
+
+def _identity_rejection(
+    asset: QualifiedAsset,
+    reason: str,
+    *,
+    match: _ExchangeIdentityMatch | None = None,
+) -> dict[str, Any]:
+    return {
+        "provider_id": asset.provider_id,
+        "provider_symbol": asset.provider_symbol,
+        "raw_rank": asset.raw_rank,
+        "qualified_rank": asset.qualified_rank,
+        "reason": reason,
+        "collision_status": match.collision_status if match is not None else reason,
+        "exchange_symbol": match.exchange_symbol if match is not None else None,
+    }
+
+
+def _membership_diagnostic(asset: QualifiedAsset, match: _ExchangeIdentityMatch) -> dict[str, Any]:
+    return {
+        "provider_id": asset.provider_id,
+        "provider_symbol": asset.provider_symbol,
+        "provider_name": asset.provider_name,
+        "raw_rank": asset.raw_rank,
+        "qualified_rank": asset.qualified_rank,
+        "qualified_rank_lower": asset.qualified_rank_lower,
+        "qualified_rank_upper": asset.qualified_rank_upper,
+        "market_cap_usd": _decimal_json(asset.market_cap),
+        "last_updated": asset.last_updated,
+        "exchange_symbol": match.exchange_symbol,
+        "exchange_base_asset": match.exchange_base_asset,
+        "contract_multiplier": match.contract_multiplier,
+        "price_quantity_basis": match.price_quantity_basis,
+        "tick_size": match.tick_size,
+        "step_size": match.step_size,
+        "collision_status": match.collision_status,
+    }
+
+
+def _observed_usdt_quote_volumes(tickers: Sequence[Mapping[str, Any]]) -> dict[str, Decimal]:
+    volumes: dict[str, Decimal] = {}
+    for raw_ticker in tickers:
+        symbol = _ticker_symbol(raw_ticker)
+        if not symbol.endswith("USDT"):
+            continue
+        quote_volume = _ticker_quote_volume(raw_ticker)
+        if quote_volume is None:
+            continue
+        volumes[symbol] = quote_volume
+    return volumes
+
+
+def _filter_text(raw_contract: Mapping[str, Any], filter_type: str, field: str) -> str | None:
+    filters = raw_contract.get("filters")
+    if isinstance(filters, (str, bytes)) or not isinstance(filters, Sequence):
+        return None
+    for item in filters:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("filterType") or "").strip().upper() != filter_type:
+            continue
+        value = item.get(field)
+        if isinstance(value, str):
+            return value if value != "" else None
+        if value is None or isinstance(value, bool):
+            return None
+        return str(value)
+    return None
+
+
+def _stated_contract_multiplier(raw_contract: Mapping[str, Any]) -> tuple[int | None, bool]:
+    observed: list[int] = []
+    for name in ("contractMultiplier", "priceMultiplier", "multiplier"):
+        if name not in raw_contract:
+            continue
+        value = raw_contract.get(name)
+        if value in (None, ""):
+            continue
+        if isinstance(value, bool):
+            return None, True
+        try:
+            if isinstance(value, float) and not value.is_integer():
+                return None, True
+            parsed = int(str(value))
+        except (TypeError, ValueError):
+            return None, True
+        if parsed < 1:
+            return None, True
+        observed.append(parsed)
+    if not observed:
+        return None, False
+    if any(item != observed[0] for item in observed):
+        return None, True
+    return observed[0], False
 
 
 def _ticker_symbol(raw_ticker: Mapping[str, Any]) -> str:
@@ -753,42 +1019,6 @@ def _ticker_quote_volume(raw_ticker: Mapping[str, Any]) -> Decimal | None:
             return None
         return quote_volume
     return None
-
-
-def _market_cap_base_symbol(raw_asset: Mapping[str, Any]) -> str:
-    if not isinstance(raw_asset, Mapping):
-        return ""
-    value = raw_asset.get("symbol")
-    if value is None:
-        return ""
-    return str(value).strip().upper()
-
-
-def _market_cap_asset_identity(raw_asset: Mapping[str, Any], *, index: int) -> str:
-    value = raw_asset.get("id") if isinstance(raw_asset, Mapping) else None
-    if value not in (None, ""):
-        return f"id:{str(value).strip().lower()}"
-    return f"row:{index}"
-
-
-def _market_cap_rank(raw_asset: Mapping[str, Any]) -> int | None:
-    rank, _status = _market_cap_rank_with_status(raw_asset)
-    return rank
-
-
-def _market_cap_rank_with_status(raw_asset: Mapping[str, Any]) -> tuple[int | None, str]:
-    if not isinstance(raw_asset, Mapping):
-        return None, "missing"
-    value = raw_asset.get("rank")
-    if value in (None, ""):
-        return None, "missing"
-    try:
-        rank = int(str(value))
-    except (TypeError, ValueError):
-        return None, "invalid"
-    if rank < 1:
-        return None, "invalid"
-    return rank, "valid"
 
 
 def _market_cap_usd(raw_asset: Mapping[str, Any]) -> Decimal | None:
