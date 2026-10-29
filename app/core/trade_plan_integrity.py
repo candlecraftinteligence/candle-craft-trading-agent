@@ -223,8 +223,9 @@ def validate_public_trade_plan(*, direction: Any, entry_low: Any, entry_high: An
         minimum = _required_decimal(minimum_rr, "minimum_rr")
     except _PlanInputError as exc:
         return _failed(exc.reason)
-    return validate_trade_plan(direction=direction, entry_low=low, entry_high=high,
-        entry_reference=high if str(direction).lower() == "long" else low,
+    side = str(direction).strip().lower()
+    return validate_trade_plan(direction=side, entry_low=low, entry_high=high,
+        entry_reference=high if side == "long" else low,
         stop_loss=stop_loss, tp1=tp1, tp2=tp2, tp3=tp3,
         minimum_rr=max(PUBLIC_TP2_MINIMUM_RR, minimum), execution_cost=execution_cost,
         entry_reference_type="worst_entry_zone_edge")

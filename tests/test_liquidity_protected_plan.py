@@ -33,9 +33,9 @@ def test_only_confirmed_closed_swings_enter_liquidity_and_swept_targets_are_iden
     assert not any(level.price == 99 for level in levels)  # two right neighbours are absent
 
 
-@pytest.mark.parametrize("direction", ["long", "short"])
+@pytest.mark.parametrize("direction", ["long", "short", " LONG ", " SHORT "])
 def test_worst_entry_and_friction_are_used_and_tp3_cannot_rescue_tp2(direction):
-    long = direction == "long"
+    long = direction.strip().lower() == "long"
     values = dict(direction=direction, entry_low=D("100") if long else D("98"),
         entry_high=D("102") if long else D("100"), stop_loss=D("95") if long else D("105"),
         tp1=D("110") if long else D("90"), tp2=D("115") if long else D("85"),

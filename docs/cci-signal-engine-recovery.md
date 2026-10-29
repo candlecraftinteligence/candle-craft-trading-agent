@@ -274,9 +274,19 @@ At implementation commit `037b5015904d956907bc66eec3a33e735a310d84`:
   test client's deprecation of its httpx integration.
 - CI dependency checks, full compileall and full pytest passed:
   https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40918361646.
-- The later ranking-budget follow-up adds two tests; its final exact-head CI
+- The later ranking-budget and direction-normalization follow-ups add four tests;
+  their final exact-head CI
   result is maintained in the review record for the same PR:
   https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/165.
+
+Final review reproduced a public-wrapper edge-selection defect for a normalized
+input such as `" LONG "`: the underlying validator accepted the trimmed direction
+but the wrapper had selected the favourable entry edge. The wrapper now
+normalizes direction once before both edge selection and validation. Expanded
+LONG/SHORT cases retain the same sub-3R, friction and stricter-floor assertions;
+the new LONG case failed before the fix. No public threshold was relaxed.
+Final protected-plan, real-product, CMC U100 and lifecycle-eligibility regression:
+**82 passed in 38.59 seconds**. Compileall, pip check and diff check passed again.
 
 The following are deterministic DEV acceptance results, with mocked upstream
 responses, fake Telegram and disposable SQLite. They are not live Runtime
