@@ -62,6 +62,31 @@ def failure_backoff_seconds(
     return round(min(float(maximum_seconds), float(base_seconds) * (2**exponent)), 3)
 
 
+def discovery_retry_backoff_seconds(
+    consecutive_failures: int,
+    *,
+    jitter: float,
+    base_seconds: float = DEFAULT_FAILURE_BACKOFF_BASE_SEC,
+    maximum_seconds: float = DEFAULT_FAILURE_BACKOFF_MAX_SEC,
+) -> float:
+    """Capped exponential discovery retry with equal jitter.
+
+    ``jitter`` is a unit draw in ``[0, 1]``. The delay stays inside
+    ``(ceiling / 2, ceiling]`` and never exceeds the finite backoff ceiling.
+    """
+
+    if jitter < 0.0 or jitter > 1.0:
+        raise ValueError("jitter must be between 0 and 1")
+    ceiling = failure_backoff_seconds(
+        consecutive_failures,
+        base_seconds=base_seconds,
+        maximum_seconds=maximum_seconds,
+    )
+    if ceiling <= 0.0:
+        return 0.0
+    return round(min(float(maximum_seconds), ceiling * (0.5 + (0.5 * float(jitter)))), 3)
+
+
 def schedule_after_iteration(
     *,
     scheduled_start_monotonic: float,
@@ -166,6 +191,7 @@ __all__ = [
     "WatchIterationStatus",
     "WatchScheduleDecision",
     "classify_watch_exception",
+    "discovery_retry_backoff_seconds",
     "failure_backoff_seconds",
     "schedule_after_iteration",
 ]

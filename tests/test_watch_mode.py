@@ -1387,6 +1387,7 @@ def test_recoverable_universe_iteration_failure_continues_and_later_succeeds(
         monotonic[0] += seconds
 
     monkeypatch.setattr(run_scan, "resolve_symbol_universe", flaky_resolver)
+    monkeypatch.setattr(run_scan, "_discovery_retry_jitter", lambda: 1.0)
     monkeypatch.setattr(run_scan, "time", SimpleNamespace(monotonic=lambda: monotonic[0]))
     monkeypatch.setattr(run_scan.asyncio, "sleep", fake_sleep)
     args = _watch_args(db_path, universe_size=1)

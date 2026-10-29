@@ -25,7 +25,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "history": "limit clamped at 1500; no unbounded pagination in the client",
         "fetcher": "BinanceFuturesClient._get_klines_delivery",
         "normalizer": "normalize_binance_klines",
-        "cache": "CachedMarketDataClient.get_klines data_type=candles",
+        "cache": "CachedMarketDataClient.get_klines data_type=candles; closed 4h/12h/1d stay cached until the next boundary when no explicit TTL is set",
         "consumer": "scanner candle fetch, essential freshness, technical structure, 2d resampler input when the source is 1d",
         "role": "required for configured strategy timeframes",
         "missing_behavior": "freshness missing or unverified; missing bars are not zero volume",
@@ -36,7 +36,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "code_refs": (
             {"path": "app/data/exchange_clients/binance_futures.py", "line": 105, "contains": '"/fapi/v1/klines"'},
             {"path": "app/data/normalizers/binance.py", "line": 41, "contains": "volume=decimal_from(require_index(raw, 5, row_path)"},
-            {"path": "app/cache/market_data_cache.py", "line": 59, "contains": '"candles": 60'},
+            {"path": "app/cache/market_data_cache.py", "line": 82, "contains": '"candles": 60'},
         ),
     },
     {
@@ -135,7 +135,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "code_refs": (
             {"path": "app/data/exchange_clients/binance_futures.py", "line": 138, "contains": '"/fapi/v1/ticker/24hr"'},
             {"path": "app/data/normalizers/bybit.py", "line": 79, "contains": '"bybit.ticker"'},
-            {"path": "app/cache/market_data_cache.py", "line": 60, "contains": '"ticker": 15'},
+            {"path": "app/cache/market_data_cache.py", "line": 83, "contains": '"ticker": 15'},
         ),
     },
     {
@@ -700,8 +700,8 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "scripts/run_scan.py", "line": 618, "contains": "default=60.0"},
-            {"path": "app/watch_supervisor.py", "line": 82, "contains": "first_next_start = scheduled + interval"},
+            {"path": "scripts/run_scan.py", "line": 624, "contains": "default=60.0"},
+            {"path": "app/watch_supervisor.py", "line": 107, "contains": "first_next_start = scheduled + interval"},
         ),
     },
 )

@@ -8,6 +8,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
+from app.analytics.discrete_fib_levels import (
+    DiscreteFibLevel,
+    evaluate_discrete_levels,
+    protected_stop_price,
+)
 from app.analytics.wick_close_structure import (
     AcceptanceStatus,
     WickCloseStructure,
@@ -92,6 +97,7 @@ class PullbackZoneInput(BaseModel):
     latest_price: MaybeDecimal = NA
     atr_15m: MaybeDecimal = NA
     tick_size: MaybeDecimal = NA
+    spread: MaybeDecimal = NA
     aggressive_toggle: bool = False
     minimum_rr: Decimal = BASE_MIN_RR
     poc: MaybeDecimal = NA
@@ -151,7 +157,9 @@ class PullbackZoneResult(BaseModel):
     fib_382: MaybeDecimal = NA
     fib_618: MaybeDecimal = NA
     fib_65: MaybeDecimal = NA
+    fib_750: MaybeDecimal = NA
     fib_786: MaybeDecimal = NA
+    discrete_fib_levels: tuple[str, ...] = ()
     fib_min: MaybeDecimal = NA
     fib_max: MaybeDecimal = NA
     pullback_depth_ratio: MaybeDecimal = NA
@@ -286,7 +294,9 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         "fib_382": fib_levels["0.382"],
         "fib_618": fib_levels["0.618"],
         "fib_65": fib_levels["0.65"],
+        "fib_750": fib_levels["0.750"],
         "fib_786": fib_levels["0.786"],
+        "discrete_fib_levels": tuple(level.summary() for level in _discrete_levels(data, candles, bos_index, impulse_start, impulse_end, ob_zone, fvg_zone)),
         "fib_min": fib_levels["min"],
         "fib_max": fib_levels["max"],
         "pullback_depth_ratio": pullback_depth_ratio if pullback_depth_ratio is not None else NA,
@@ -345,6 +355,11 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         )
 
     selected = _select_zone(data, ob_zone, fvg_zone, fib_levels)
+    discrete_ratio: Decimal | None = None
+    if selected is None:
+        selected, discrete_ratio = _select_discrete_level(
+            data, ob_zone, fvg_zone, candles, bos_index, impulse_start, impulse_end,
+        )
     if selected is None:
         return _failed_result(
             data,
@@ -360,7 +375,17 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         )
 
     entry = _entry_price(data.direction, selected)
-    fib_alignment = _fib_alignment_for_levels(data.direction, impulse_start, impulse_end, entry, data.aggressive_toggle)
+    if discrete_ratio is None:
+        fib_alignment = _fib_alignment_for_levels(data.direction, impulse_start, impulse_end, entry, data.aggressive_toggle)
+    else:
+        fib_alignment = fib_alignment.model_copy(
+            update={
+                "is_aligned": True,
+                "retracement": discrete_ratio,
+                "status": f"aligned_discrete_{discrete_ratio}",
+                "reason": "Independent Fibonacci level confirmed by a closed body inside a fresh zone.",
+            }
+        )
     if not fib_alignment.is_aligned:
         return _failed_result(
             data,
@@ -548,7 +573,9 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         fib_382=fib_levels["0.382"],
         fib_618=fib_levels["0.618"],
         fib_65=fib_levels["0.65"],
+        fib_750=fib_levels["0.750"],
         fib_786=fib_levels["0.786"],
+        discrete_fib_levels=base_update["discrete_fib_levels"],
         fib_min=fib_levels["min"],
         fib_max=fib_levels["max"],
         pullback_depth_ratio=pullback_depth_ratio if pullback_depth_ratio is not None else NA,
@@ -740,6 +767,97 @@ def _order_block_zone(
     )
 
 
+def _fresh_zone_bounds(zone: PullbackZone) -> tuple[str, Decimal, Decimal, str] | None:
+    if not zone.is_present or zone.low == NA or zone.high == NA:
+        return None
+    return (
+        str(zone.zone_type),
+        _decimal_from(zone.low, "zone.low"),
+        _decimal_from(zone.high, "zone.high"),
+        str(zone.freshness_status),
+    )
+
+
+def _discrete_levels(
+    data: PullbackZoneInput,
+    candles: Sequence[_Candle],
+    bos_index: int,
+    sweep: Decimal,
+    bos: Decimal,
+    ob_zone: PullbackZone,
+    fvg_zone: PullbackZone,
+) -> tuple[DiscreteFibLevel, ...]:
+    zones = tuple(
+        bounds
+        for bounds in (
+            _fresh_zone_bounds(ob_zone),
+            _fresh_zone_bounds(fvg_zone),
+            *(_fresh_zone_bounds(zone) for zone in _candidate_zones(ob_zone, fvg_zone)),
+        )
+        if bounds is not None
+    )
+    try:
+        return evaluate_discrete_levels(
+            direction=data.direction,
+            sweep=sweep,
+            bos=bos,
+            zones=zones,
+            candles=candles[bos_index + 1 :],
+        )
+    except ValueError:
+        return ()
+
+
+def _select_discrete_level(
+    data: PullbackZoneInput,
+    ob_zone: PullbackZone,
+    fvg_zone: PullbackZone,
+    candles: Sequence[_Candle],
+    bos_index: int,
+    sweep: Decimal,
+    bos: Decimal,
+) -> tuple[PullbackZone | None, Decimal | None]:
+    for level in _discrete_levels(data, candles, bos_index, sweep, bos, ob_zone, fvg_zone):
+        if not level.execution_eligible:
+            continue
+        host = _zone_hosting_price(ob_zone, fvg_zone, level.price)
+        if host is None:
+            continue
+        price = _quantize(level.price)
+        return (
+            host.model_copy(
+                update={
+                    "entry_low": price,
+                    "entry_high": price,
+                    "midpoint": price,
+                    "fib_alignment_status": f"discrete_{level.ratio}",
+                    "reason": level.reason,
+                }
+            ),
+            level.ratio,
+        )
+    return None, None
+
+
+def _zone_hosting_price(
+    ob_zone: PullbackZone,
+    fvg_zone: PullbackZone,
+    price: Decimal,
+) -> PullbackZone | None:
+    hosts = [
+        zone
+        for zone in _candidate_zones(ob_zone, fvg_zone)
+        if zone.is_present
+        and zone.freshness_status == "fresh"
+        and zone.low != NA
+        and zone.high != NA
+        and _decimal_from(zone.low, "zone.low") <= price <= _decimal_from(zone.high, "zone.high")
+    ]
+    if not hosts:
+        return None
+    return sorted(hosts, key=lambda zone: (zone.zone_type == "OB_FVG_OVERLAP", zone.zone_type == "OB"), reverse=True)[0]
+
+
 def _select_zone(
     data: PullbackZoneInput,
     ob_zone: PullbackZone,
@@ -834,14 +952,23 @@ def _stop_price(data: PullbackZoneInput, sweep_candle: _Candle, ob_zone: Pullbac
         structure_edge = sweep_candle.low
         if ob_zone.is_present and ob_zone.wick_low != NA:
             structure_edge = min(structure_edge, _decimal_from(ob_zone.wick_low, "ob.wick_low"))
-        stop = structure_edge - (atr_buffer if atr_buffer != NA else tick_size)
-        return (_quantize(stop), atr_buffer) if stop < entry else (NA, atr_buffer)
-
-    structure_edge = sweep_candle.high
-    if ob_zone.is_present and ob_zone.wick_high != NA:
-        structure_edge = max(structure_edge, _decimal_from(ob_zone.wick_high, "ob.wick_high"))
-    stop = structure_edge + (atr_buffer if atr_buffer != NA else tick_size)
-    return (_quantize(stop), atr_buffer) if stop > entry else (NA, atr_buffer)
+        liquidity = _extract_levels(data.liquidity_below)
+    else:
+        structure_edge = sweep_candle.high
+        if ob_zone.is_present and ob_zone.wick_high != NA:
+            structure_edge = max(structure_edge, _decimal_from(ob_zone.wick_high, "ob.wick_high"))
+        liquidity = _extract_levels(data.liquidity_above)
+    spread = None if data.spread == NA else _decimal_from(data.spread, "spread")
+    stop = protected_stop_price(
+        direction=data.direction,
+        entry=entry,
+        structure_extreme=structure_edge,
+        liquidity_levels=liquidity,
+        atr_buffer=None if atr_buffer == NA else _decimal_from(atr_buffer, "atr_stop_buffer"),
+        spread=spread,
+        tick_size=tick_size,
+    )
+    return (_quantize(stop), atr_buffer) if stop is not None else (NA, atr_buffer)
 
 
 def _targets(
@@ -961,16 +1088,19 @@ def _fib_levels(direction: TradeDirection, sweep: Decimal, bos: Decimal) -> dict
         fib_382 = bos - impulse * Decimal("0.382")
         fib_618 = bos - impulse * Decimal("0.618")
         fib_65 = bos - impulse * Decimal("0.65")
+        fib_750 = bos - impulse * Decimal("0.750")
         fib_786 = bos - impulse * Decimal("0.786")
     else:
         fib_382 = bos + impulse * Decimal("0.382")
         fib_618 = bos + impulse * Decimal("0.618")
         fib_65 = bos + impulse * Decimal("0.65")
+        fib_750 = bos + impulse * Decimal("0.750")
         fib_786 = bos + impulse * Decimal("0.786")
     return {
         "0.382": _quantize(fib_382),
         "0.618": _quantize(fib_618),
         "0.65": _quantize(fib_65),
+        "0.750": _quantize(fib_750),
         "0.786": _quantize(fib_786),
         "min": _quantize(min(fib_382, fib_618)),
         "max": _quantize(max(fib_382, fib_618)),

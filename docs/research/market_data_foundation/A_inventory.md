@@ -23,7 +23,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - history: limit clamped at 1500; no unbounded pagination in the client
 - fetcher: BinanceFuturesClient._get_klines_delivery
 - normalizer: normalize_binance_klines
-- cache: CachedMarketDataClient.get_klines data_type=candles
+- cache: CachedMarketDataClient.get_klines data_type=candles; closed 4h/12h/1d stay cached until the next boundary when no explicit TTL is set
 - consumer: scanner candle fetch, essential freshness, technical structure, 2d resampler input when the source is 1d
 - role: required for configured strategy timeframes
 - missing_behavior: freshness missing or unverified; missing bars are not zero volume
@@ -34,7 +34,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/data/exchange_clients/binance_futures.py:105` contains `"/fapi/v1/klines"`
   - `app/data/normalizers/binance.py:41` contains `volume=decimal_from(require_index(raw, 5, row_path)`
-  - `app/cache/market_data_cache.py:59` contains `"candles": 60`
+  - `app/cache/market_data_cache.py:82` contains `"candles": 60`
 
 ## ohlcv_bybit_linear
 
@@ -130,7 +130,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/data/exchange_clients/binance_futures.py:138` contains `"/fapi/v1/ticker/24hr"`
   - `app/data/normalizers/bybit.py:79` contains `"bybit.ticker"`
-  - `app/cache/market_data_cache.py:60` contains `"ticker": 15`
+  - `app/cache/market_data_cache.py:83` contains `"ticker": 15`
 
 ## mark_index_last
 
@@ -678,5 +678,5 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `scripts/run_scan.py:618` contains `default=60.0`
-  - `app/watch_supervisor.py:82` contains `first_next_start = scheduled + interval`
+  - `scripts/run_scan.py:624` contains `default=60.0`
+  - `app/watch_supervisor.py:107` contains `first_next_start = scheduled + interval`
