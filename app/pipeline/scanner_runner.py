@@ -136,11 +136,12 @@ from app.data.candle_integrity import (
 )
 from app.strategies.context_fields import htf_value
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
-from app.data.exceptions import ExchangeTimeoutError
+from app.data.exceptions import ExchangeClientError, ExchangeTimeoutError
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.data.timeframes import resample_ohlcv_candles
 from app.analytics.selective_fibonacci import LEGACY_VERSION, SELECTIVE_VERSION, StrategyVersion
 from app.data.instrument_precision import InstrumentPrecision
+from app.core.rejection_category import rejection_category
 from app.strategies.selective_timeframes import HIERARCHY
 from app.core.minimum_rr import (
     DEFAULT_CONFIGURED_MINIMUM_RR,
@@ -280,6 +281,7 @@ class ScannerRunConfig(BaseModel):
     leverage: Decimal | None = None
     min_score_for_idea: Decimal = Decimal("80")
     min_rr: Decimal = DEFAULT_CONFIGURED_MINIMUM_RR
+    execution_friction_bps: Decimal = Field(default=Decimal("12"), ge=0, le=1000)
     verbose: bool = False
     strategy_name: str | None = LIQUIDITY_GRAB_STRATEGY_NAME
     strategy_modes: tuple[LiquidityGrabMode, ...] = DEFAULT_STRATEGY_MODES
@@ -553,6 +555,7 @@ class ScannerSymbolResult(BaseModel):
     status_history: tuple[ScannerPipelineStatus, ...]
     error_message: str | None = None
     rejection_reason: str | None = None
+    rejection_category: str = NA
     runtime_seconds: float | None = None
     timed_out: bool = False
     timeout_status: Literal["none", "request_timeout", "symbol_timeout", "global_timeout"] = "none"
@@ -1053,6 +1056,7 @@ class ScannerRunner:
                         reason,
                         runtime_seconds=elapsed,
                         timeout_status="request_timeout" if isinstance(exc, ExchangeTimeoutError) else "none",
+                        category="PROVIDER_FAILURE" if isinstance(exc, ExchangeClientError) else "INTERNAL_ERROR",
                     )
                 if macro_event_snapshot is not None:
                     symbol_result = apply_macro_event_context_to_symbol_result(
@@ -1765,6 +1769,9 @@ class ScannerRunner:
                 current_daily_loss_pct=config.current_daily_loss_pct,
                 data_quality_score=data_quality_score,
                 invalidation_reason=candidate.invalidation,
+                execution_cost=(strategy_execution.selected_setup.pullback_zone.execution_cost
+                                if strategy_execution.selected_setup is not None else Decimal("0")),
+                minimum_tp2_rr=max(Decimal("3"), config.min_rr) if config.strategy_version == SELECTIVE_VERSION else None,
             )
         )
         if not risk_decision.approved:
@@ -2250,7 +2257,8 @@ class ScannerRunner:
 
         strategy_results: dict[str, LiquidityGrabResult] = {}
         base_input.update(strategy_version=config.strategy_version, exchange=config.exchange,
-                          decision_timestamp=config.decision_timestamp)
+                          decision_timestamp=config.decision_timestamp,
+                          execution_friction_bps=config.execution_friction_bps)
         if config.strategy_version == SELECTIVE_VERSION:
             precision = None
             method = getattr(client, "get_price_precision", None)
@@ -2282,8 +2290,12 @@ class ScannerRunner:
                 result = self.strategy_engine.analyze(strategy_input)
             except Exception as exc:
                 self.logger.warning("Strategy %s failed for symbol=%s mode=%s: %s", config.strategy_name, symbol, mode_name, exc)
+                code = str(exc).split(":", 1)[0]
+                category = rejection_category(code)
+                expected_data_error = category in {"DATA_STALE", "DATA_UNAVAILABLE"}
                 diagnostics[mode_name] = {"error": str(exc), "strategy_version": config.strategy_version,
-                                          "htf_timeframe": config.htf_timeframe}
+                    "htf_timeframe": config.htf_timeframe, "first_failed_gate": code if expected_data_error else "strategy_error",
+                    "rejection_category": category if expected_data_error else "INTERNAL_ERROR"}
                 rejected_modes.append(mode_name)
                 continue
 
@@ -2900,6 +2912,9 @@ class ScannerRunner:
         shadow, causal = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
         return ScannerSymbolResult(
             cmc_native_evidence=optional_data.cmc_native_evidence,
+            rejection_category=(NA if trade_idea is not None else strategy_execution.strategy_diagnostics.get(
+                "rejection_category", _representative_strategy_diagnostics(strategy_execution).get(
+                "rejection_category", rejection_category(rejection_reason or status.value)))),
             symbol=symbol,
             status=status,
             status_history=status_history,
@@ -4136,7 +4151,9 @@ def _freshness_blocked_strategy_execution(
     missing, unverified = bundle.diagnostic_lines()
     return _StrategyExecution(
         strategy_name=config.strategy_name or NA,
-        strategy_diagnostics={"essential_candle_freshness": bundle.receipt(), "strategy_version": config.strategy_version},
+        strategy_diagnostics={"essential_candle_freshness": bundle.receipt(), "strategy_version": config.strategy_version,
+            "rejection_category": "DATA_STALE" if any(item.status is CandleFreshnessStatus.STALE
+                for item in bundle.assessments) else "DATA_UNAVAILABLE"},
         strategy_missing_data=missing,
         strategy_unverified_data=unverified,
         rejected_strategy_modes=tuple(mode.value for mode in config.strategy_modes),
@@ -4176,11 +4193,17 @@ def _strategy_setup_for_mode(result: LiquidityGrabResult, mode: LiquidityGrabMod
 
 def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]:
     return {
+        "rejection_category": rejection_category(setup.first_failed_gate, valid=setup.is_valid),
         "strategy_version": setup.strategy_version,
         "htf_1d_context_source": setup.htf_1d_context_source,
         "candles_1d_count": setup.candles_1d_count,
         "htf_1d_trend": setup.htf_1d_trend,
         "selective_fib": setup.pullback_zone.selective_fib.model_dump(mode="json"),
+        "economic_plan_version": "liquidity-protected-v1" if setup.strategy_version == SELECTIVE_VERSION else "legacy",
+        "stop_evidence": setup.pullback_zone.stop_evidence,
+        "tp2_source": setup.pullback_zone.tp2_source,
+        "execution_cost": setup.pullback_zone.execution_cost,
+        "execution_friction_bps": setup.pullback_zone.execution_friction_bps,
         "mode": setup.mode.value,
         "is_valid": setup.is_valid,
         "status": setup.status,
@@ -5415,12 +5438,14 @@ def _scan_error_result(
     *,
     runtime_seconds: float | None = None,
     timeout_status: Literal["none", "request_timeout", "symbol_timeout", "global_timeout"] = "none",
+    category: str = "INTERNAL_ERROR",
 ) -> ScannerSymbolResult:
     return ScannerSymbolResult(
         symbol=symbol,
         status=ScannerPipelineStatus.SCAN_ERROR,
         status_history=(ScannerPipelineStatus.SCAN_ERROR,),
         error_message=reason,
+        rejection_category=category,
         rejection_reason=reason,
         runtime_seconds=_rounded_seconds(runtime_seconds) if runtime_seconds is not None else None,
         timed_out=timeout_status != "none",

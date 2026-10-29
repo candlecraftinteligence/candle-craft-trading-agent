@@ -52,8 +52,8 @@ def _confirmed_symbol(signal_id: str):
     strategy_diagnostics = {
         mode: {
             **diagnostics,
-            "rr_to_tp2": Decimal("4"),
-            "planned_rr": Decimal("4"),
+            "rr_to_tp2": Decimal("3"),
+            "planned_rr": Decimal("3"),
             "opportunity_score": Decimal("95"),
         }
         for mode, diagnostics in symbol.strategy_diagnostics.items()
@@ -65,7 +65,7 @@ def _confirmed_symbol(signal_id: str):
             "last_seen_at": first_close,
             "last_transition_at": first_close,
             "confirmed_at": first_close,
-            "rr": "4",
+            "rr": "3",
         }
     )
     transition = symbol.lifecycle_transition.model_copy(update={"record": record})
@@ -80,10 +80,7 @@ def _confirmed_symbol(signal_id: str):
     return symbol.model_copy(
         update={
             "strategy_diagnostics": strategy_diagnostics,
-            "trade_idea": _trade_idea(
-                best_rr=Decimal("4"),
-                opportunity_score=Decimal("95"),
-            ),
+            "trade_idea": symbol.trade_idea.model_copy(update={"opportunity_score": Decimal("95")}),
             "lifecycle_state": record,
             "lifecycle_transition": transition,
         }
@@ -162,7 +159,7 @@ def test_confirmation_candle_is_ambiguous_then_full_candle_entry_and_tp_chain(
             scan_run_id="incident-confirmed",
         )
     )
-    assert root.sent == 1
+    assert root.sent == 1, root.deliveries
     with SQLiteSetupLifecycleRepository(db_path) as repository:
         repository.upsert_record(confirmed.lifecycle_state)
 
@@ -235,7 +232,7 @@ def test_confirmation_candle_is_ambiguous_then_full_candle_entry_and_tp_chain(
     assert tp1_progress.progress.tp1_at == _decision(2).isoformat()
     assert tp1.sent == 1
 
-    candles.append(_candle(3, high="113", low="108"))
+    candles.append(_candle(3, high="124", low="108"))
     tp2_progress = _evaluate(db_path, entered.record.lifecycle_id, candles)
     tp2 = run(
         _service(db_path, sender).deliver_for_run(
@@ -246,7 +243,7 @@ def test_confirmation_candle_is_ambiguous_then_full_candle_entry_and_tp_chain(
     assert tp2_progress.progress.tp2_at == _decision(3).isoformat()
     assert tp2.sent == 1
 
-    candles.append(_candle(4, high="118", low="113"))
+    candles.append(_candle(4, high="131", low="124"))
     tp3_progress = _evaluate(db_path, entered.record.lifecycle_id, candles)
     tp3 = run(
         _service(db_path, sender).deliver_for_run(
@@ -324,11 +321,11 @@ def test_confirmed_without_entry_touch_has_no_limit_or_tp_milestone(
     progress = _evaluate(
         db_path,
         confirmed.lifecycle_state.lifecycle_id,
-        [_candle(0, high="118", low="103")],
+        [_candle(0, high="131", low="103")],
     )
     current = confirmed.model_copy(
         update={
-            "current_price": Decimal("118"),
+            "current_price": Decimal("131"),
             "lifecycle_state": progress.record,
             "lifecycle_transition": None,
             "lifecycle_transitions": (),

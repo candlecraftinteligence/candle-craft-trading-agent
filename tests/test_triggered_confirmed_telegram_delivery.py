@@ -86,9 +86,10 @@ def _public_setup_symbol(
 ):
     short = direction == "short"
     risk = stop_loss - entry_high if short else entry_low - stop_loss
+    worst_risk = stop_loss - entry_low if short else entry_high - stop_loss
     tp1 = entry_low - risk if short else entry_high + risk
-    tp2 = entry_low - (risk * Decimal("2")) if short else entry_high + (risk * Decimal("2"))
-    tp3 = entry_low - (risk * Decimal("3")) if short else entry_high + (risk * Decimal("3"))
+    tp2 = entry_low - (worst_risk * Decimal("3")) if short else entry_high + (worst_risk * Decimal("3"))
+    tp3 = entry_low - (worst_risk * Decimal("4")) if short else entry_high + (worst_risk * Decimal("4"))
     invalidation = (
         f"Invalid if price accepts above {stop_loss}."
         if short
@@ -140,6 +141,9 @@ def _public_setup_symbol(
     )
     return symbol.model_copy(
         update={
+            "trade_idea": _trade_idea(direction=direction, entry_low=entry_low, entry_high=entry_high,
+                stop_loss=stop_loss, take_profit_targets=(tp1, tp2, tp3), best_rr=Decimal("3"),
+                invalidation=invalidation),
             "valid_strategy_modes": source_modes,
             "strategy_diagnostics": {
                 source_mode: {**diagnostics, "mode": source_mode}
@@ -230,6 +234,7 @@ def _generated_entry_batch(
             repository,
             lifecycle_id=lifecycle_id,
             mode="swing",
+            plan_overrides={"tp2": "138", "tp3": "150", "rr": "3"},
         )
         candles.append(_outcome_entry(1, "long"))
         outcome = _evaluate_outcomes(repository, record, candles)
@@ -238,6 +243,10 @@ def _generated_entry_batch(
         SetupLifecycleState.MANAGING,
         previous=SetupLifecycleState.EXECUTING,
         signal_id=lifecycle_id,
+        diagnostics=_diagnostics(stop=Decimal("90"), tp1=Decimal("110"), tp2=Decimal("138"), tp3=Decimal("150"),
+            execution_sweep_status="passed", confirmation_structure_shift_status="passed"),
+        trade_idea=_trade_idea(stop_loss=Decimal("90"),
+            take_profit_targets=(Decimal("110"), Decimal("138"), Decimal("150"))),
     )
     return symbol.model_copy(
         update={

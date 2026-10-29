@@ -100,3 +100,48 @@ Focused strategy, legacy, candle-freshness, RR and fake-delivery regressions:
 **153 passed in 21.52 seconds**. These runs overlap and must not be summed.
 Full `compileall`, `pip check` and `git diff --check` passed. Exact-head full-suite,
 end-to-end product verification and CI are still pending.
+
+## Final economics and entry semantics (group C)
+
+The prospective stop is beyond the sweep/OB invalidation and nearby confirmed
+liquidity proxies within one observed ATR. The buffer is the largest of the
+existing 0.10 ATR buffer, observed spread when supplied, and one verified tick.
+Stops round outward. Distant liquidity is diagnosed rather than blindly widening
+the stop. Two closed neighbours on each side confirm liquidity swing proxies;
+already swept levels cannot serve as opposing-liquidity targets.
+
+The final public contract is `validate_public_trade_plan`, in the existing
+trade-plan validator. It uses the worst entry-zone edge, final protected stop,
+TP2 and execution costs. The public floor is always 3.0 and higher configured
+floors remain binding. The prospective target selection is independent of RR:
+TP2 must be an opposing structural level, targets round inward, and weak final
+economics are rejected without target expansion. Telegram and lifecycle use
+the same validator instead of trusting an asserted RR or falling back to TP1.
+
+`execution_friction_bps=12` is an explicit conservative modelling allowance,
+not a verified exchange fee schedule. Observed spread is added when available;
+otherwise two ticks are reserved. Actual fees/spread/slippage remain Unverified
+when no verified observation exists. Risk sizing includes this allowance and
+rounds quantity down, so a wider stop cannot increase permitted monetary risk.
+
+Prospective strategy output says `Entry confirmed`, never `Filled` from a wick.
+Historical outcome tracking keeps its existing simulated state progression and
+same-candle stop precedence. New entry evidence explicitly records simulated
+price contact, false user/exchange execution verification, source timestamps
+and economic plan version. A simulated touch cannot supply missing structural
+confirmation for a new public signal. Existing TP milestones and epoch ownership
+are retained; no historical database rewrite or schema migration was performed.
+
+Explicit primary rejection categories distinguish setup absence, missing
+confirmation, invalid economics, unavailable/stale data, provider failures and
+internal errors. No category provides directional market evidence.
+
+Verification: **231 passed in 31.97 seconds** for focused risk/strategy/public
+delivery regressions; **208 passed in 28.32 seconds** for historical lifecycle,
+geometry, economic identity and new anti-forgery/contact guards; final economic
+contract run **151 passed in 15.69 seconds**. Runs overlap. Old positive public
+fixtures that asserted 3R/4R with weaker TP2 geometry were corrected to truthful
+synthetic plans. Their deduplication, delivery and milestone assertions remain;
+negative tests explicitly retain the old failing geometry. Historical outcome
+fixtures retain their default economics; only prospective transport fixtures
+opt into a qualifying plan before persistence/ownership is established.

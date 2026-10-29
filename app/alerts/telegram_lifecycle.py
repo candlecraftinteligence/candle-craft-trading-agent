@@ -47,7 +47,7 @@ from app.alerts.watchlist_expiry import (
 )
 from app.core.config import Settings
 from app.core.confirmed_data_health import confirmed_data_health_for_symbol
-from app.core.trade_plan_integrity import validate_trade_plan
+from app.core.trade_plan_integrity import validate_trade_plan, validate_public_trade_plan
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
     SignalEdgeEvidence,
@@ -10877,7 +10877,25 @@ def _defensive_delivery_blockers(
     if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
         return ()
 
-    blockers: list[str] = []
+    diagnostics = _representative_diagnostics(symbol_result)
+    plan = validate_public_trade_plan(direction=message.direction,
+        entry_low=message.entry_low, entry_high=message.entry_high, stop_loss=message.stop_loss,
+        tp1=message.tp1, tp2=message.tp2, tp3=message.tp3, minimum_rr=context.min_rr,
+        execution_cost=_decimal_or_none(diagnostics.get("execution_cost")) or Decimal("0"))
+    economic_blockers = () if plan.valid else (f"confirmed_economic_plan:{plan.reason}",)
+    claimed_rr = _decimal_or_none(message.planned_rr)
+    if claimed_rr is not None and plan.rr is not None and claimed_rr > plan.rr + Decimal("0.00000001"):
+        economic_blockers += ("confirmed_tp2_rr_overstated",)
+    blockers: list[str] = list(economic_blockers)
+    progress = symbol_result.lifecycle_outcome_progress
+    if progress is not None:
+        try:
+            entry_metadata = json.loads(progress.metadata_json)
+        except (ValueError, TypeError):
+            entry_metadata = {}
+        if (entry_metadata.get("execution_semantics") == "simulated_price_contact"
+                and _status_key(diagnostics.get("confirmation_structure_shift_status")) != "passed"):
+            blockers.append("simulated_contact_not_structural_confirmation")
     rejection_context = _confirmed_rejection_context(symbol_result, message)
     quality_blockers = _public_quality_gate_blockers(symbol_result)
     blockers.extend(quality_blockers)

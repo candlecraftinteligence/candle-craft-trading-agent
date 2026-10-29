@@ -42,7 +42,7 @@ StructureLayerStatus = Literal[
     "ANALYZED_NO_SHIFT",
     "ANALYZED_SHIFT_PRESENT",
 ]
-SetupStatus = Literal["Pending", "Filled", "TP1", "TP2", "TP3", "Closed", "Rejected"]
+SetupStatus = Literal["Pending", "Entry confirmed", "Filled", "TP1", "TP2", "TP3", "Closed", "Rejected"]
 TrustGrade = Literal["A", "B", "No trade"]
 RiskTier = Literal["conservative", "base", "aggressive", "no_trade"]
 TrendLabel = Literal["bullish", "bearish", "neutral", "N/A"]
@@ -356,6 +356,8 @@ class LiquidityGrabInput(BaseModel):
     candles_1d: Sequence[Any] | None = None
     tick_size: MaybeDecimal = NA
     precision_source: str = NA
+    spread: MaybeDecimal = NA
+    execution_friction_bps: Decimal = Decimal("12")
     htf_1d_context_source: str = NA
 
     @model_validator(mode="before")
@@ -365,6 +367,7 @@ class LiquidityGrabInput(BaseModel):
             value = dict(value)
             value.setdefault("htf_timeframe", "1d")
             value.setdefault("structure_timeframe", "4h")
+            value["min_rr"] = max(Decimal("3"), validate_configured_minimum_rr(value.get("min_rr", DEFAULT_CONFIGURED_MINIMUM_RR)))
         return value
     symbol: str
     mode: LiquidityGrabMode = LiquidityGrabMode.swing
@@ -709,6 +712,10 @@ class LiquidityGrabEngine:
                 structure_confirmed=(structure_layer_analysis.status == "ANALYZED_SHIFT_PRESENT"
                                      and structure_layer_analysis.direction == direction),
                 canonical_confirmation=structure_shift.is_present and sweep.is_present and momentum.is_confirmed,
+                liquidity_candles={timeframe: normalized[timeframe] for timeframe in ("1d", "12h", "4h")
+                                   if normalized.get(timeframe)},
+                spread=data.spread,
+                execution_friction_bps=data.execution_friction_bps,
                 symbol=data.symbol,
                 direction=trade_direction,
                 execution_timeframe=execution.timeframe,
@@ -819,6 +826,8 @@ class LiquidityGrabEngine:
                 entry_low,
                 entry_high,
             )
+            if data.strategy_version == SELECTIVE_VERSION:
+                status = "Entry confirmed"
 
         return LiquidityGrabSetup(
             mode=mode,

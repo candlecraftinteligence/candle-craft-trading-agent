@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -16,7 +16,8 @@ from app.analytics.wick_close_structure import (
 )
 from app.core.minimum_rr import CHALLENGE_HARD_MINIMUM_RR, SWING_HARD_MINIMUM_RR
 from app.core.price_precision import quantize_public_price
-from app.core.trade_plan_integrity import validate_trade_plan
+from app.core.trade_plan_integrity import validate_trade_plan, validate_public_trade_plan
+from app.analytics.structural_liquidity import confirmed_levels, protected_stop
 from app.analytics.selective_fibonacci import (
     LEGACY_VERSION, SELECTIVE_VERSION, StrategyVersion, SelectiveFibEvidence, select_target,
 )
@@ -88,6 +89,9 @@ class PullbackZoneInput(BaseModel):
     precision_source: str = NA
     structure_confirmed: bool = False
     canonical_confirmation: bool = False
+    liquidity_candles: Mapping[str, Sequence[Any]] = {}
+    spread: MaybeDecimal = NA
+    execution_friction_bps: Decimal = Decimal("12")
     symbol: str
     direction: TradeDirection
     execution_timeframe: str
@@ -137,6 +141,10 @@ class PullbackZoneInput(BaseModel):
 class PullbackZoneResult(BaseModel):
     strategy_version: StrategyVersion = LEGACY_VERSION
     selective_fib: SelectiveFibEvidence = SelectiveFibEvidence()
+    stop_evidence: dict[str, Any] = {}
+    tp2_source: str = NA
+    execution_cost: Decimal = Decimal("0")
+    execution_friction_bps: Decimal = Decimal("0")
     valid: bool = False
     direction: TradeDirection | Literal["N/A"] = NA
     pullback_zone_status: Literal["valid", "failed", "N/A"] = "N/A"
@@ -211,6 +219,8 @@ class _Candle:
 
 def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> PullbackZoneResult:
     data = input_data if isinstance(input_data, PullbackZoneInput) else PullbackZoneInput.model_validate(input_data)
+    if data.strategy_version == SELECTIVE_VERSION:
+        data = data.model_copy(update={"minimum_rr": max(Decimal("3"), data.minimum_rr)})
     calculation_timeframe, candle_values, candle_label = _calculation_candle_source(data)
     candles, errors = _normalize_candles(candle_values, candle_label)
     if errors:
@@ -430,7 +440,25 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
             fib_alignment=fib_alignment,
         )
 
-    stop, atr_stop_buffer = _stop_price(data, candles[sweep_index], ob_zone, entry)
+    liquidity = tuple(level for timeframe, sample in data.liquidity_candles.items()
+                      for level in confirmed_levels(sample, timeframe=timeframe)) if data.strategy_version == SELECTIVE_VERSION else ()
+    if data.strategy_version == SELECTIVE_VERSION:
+        liquidity += confirmed_levels(candles, timeframe=calculation_timeframe)
+        if data.atr_15m == NA:
+            return _failed_result(data, "missing_stop_volatility", "ATR is N/A; structural stop cannot be justified.", **base_update)
+        structure_edge = (min(candles[sweep_index].low, ob_zone.wick_low) if data.direction == "long" and ob_zone.wick_low != NA
+                          else max(candles[sweep_index].high, ob_zone.wick_high) if data.direction == "short" and ob_zone.wick_high != NA
+                          else candles[sweep_index].low if data.direction == "long" else candles[sweep_index].high)
+        try:
+            protection = protected_stop(direction=data.direction, entry=entry, invalidation=structure_edge,
+                atr=_decimal_from(data.atr_15m, "atr_15m"), tick_size=_tick_size(data.tick_size),
+                spread=None if data.spread == NA else _decimal_from(data.spread, "spread"), levels=liquidity)
+        except ValueError as exc:
+            return _failed_result(data, "unjustified_structural_stop", str(exc), **base_update)
+        stop, atr_stop_buffer = protection.price, protection.buffer
+        base_update["stop_evidence"] = asdict(protection)
+    else:
+        stop, atr_stop_buffer = _stop_price(data, candles[sweep_index], ob_zone, entry)
     if stop == NA:
         return _failed_result(
             data,
@@ -446,18 +474,48 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         )
 
     tp1, tp2, tp3 = _targets(data, entry, impulse_start, impulse_end)
-    entry_reference_type = "zone_low_limit" if data.direction == "long" else "zone_high_limit"
-    plan_integrity = validate_trade_plan(
-        direction=data.direction,
-        entry_low=selected.entry_low,
-        entry_high=selected.entry_high,
-        entry_reference=entry,
-        stop_loss=stop,
-        tp1=tp1,
-        tp2=tp2,
-        tp3=tp3,
-        entry_reference_type=entry_reference_type,
-    )
+    execution_cost = Decimal("0")
+    if data.strategy_version == SELECTIVE_VERSION:
+        opposing = sorted({level.price for level in liquidity if not level.swept and
+            (level.side == "above" and level.price > entry if data.direction == "long"
+             else level.side == "below" and level.price < entry)} |
+            set(_extract_levels(data.user_resistance_levels if data.direction == "long" else data.user_support_levels)),
+            reverse=data.direction == "short")
+        opposing = [price for price in opposing if (price > entry if data.direction == "long" else price < entry)]
+        if len(opposing) < 2:
+            return _failed_result(data, "missing_opposing_liquidity", "TP2 requires a second meaningful opposing structural level.", **base_update)
+        tp1, tp2 = opposing[:2]
+        # A third real level is preferable. The existing extension remains an
+        # optional runner objective only when it is beyond the structural TP2.
+        tp3 = opposing[2] if len(opposing) > 2 else tp3
+        rounding = ROUND_FLOOR if data.direction == "long" else ROUND_CEILING
+        tick = _tick_size(data.tick_size)
+        tp1, tp2, tp3 = tuple((price/tick).to_integral_value(rounding=rounding)*tick for price in (tp1, tp2, tp3))
+        base_update["tp2_source"] = "opposing_structural_liquidity"
+        if not data.execution_friction_bps.is_finite() or data.execution_friction_bps < 0:
+            return _failed_result(data, "unverified_execution_cost", "Execution friction allowance is invalid.", **base_update)
+        execution_cost = entry*data.execution_friction_bps/Decimal("10000") + (
+            _decimal_from(data.spread, "spread") if data.spread != NA else _tick_size(data.tick_size)*2)
+        base_update.update(execution_cost=execution_cost, execution_friction_bps=data.execution_friction_bps)
+    entry_reference_type = ("worst_entry_zone_edge" if data.strategy_version == SELECTIVE_VERSION else
+                            "zone_low_limit" if data.direction == "long" else "zone_high_limit")
+    if data.strategy_version == SELECTIVE_VERSION:
+        plan_integrity = validate_public_trade_plan(direction=data.direction,
+            entry_low=selected.entry_low, entry_high=selected.entry_high, stop_loss=stop,
+            tp1=tp1, tp2=tp2, tp3=tp3, minimum_rr=data.minimum_rr, execution_cost=execution_cost)
+    else:
+        plan_integrity = validate_trade_plan(
+            direction=data.direction,
+            entry_low=selected.entry_low,
+            entry_high=selected.entry_high,
+            entry_reference=entry,
+            stop_loss=stop,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            entry_reference_type=entry_reference_type,
+            execution_cost=execution_cost,
+        )
     integrity_update = {
         "trade_plan_integrity": "PASS" if plan_integrity.valid else "FAIL",
         "trade_plan_integrity_reason": plan_integrity.reason,
@@ -474,7 +532,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
     if not plan_integrity.valid or plan_integrity.rr is None:
         return _failed_result(
             data,
-            "trade_plan_integrity",
+            "rr_below_minimum" if plan_integrity.reason == "rr_below_minimum" else "trade_plan_integrity",
             plan_integrity.reason,
             **base_update,
             selected_zone=selected,
@@ -487,20 +545,22 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
             tp2=tp2,
             tp3=tp3,
             atr_stop_buffer=atr_stop_buffer,
+            rr_to_tp2=_quantize(plan_integrity.rr) if plan_integrity.rr is not None else NA,
             fib_alignment=fib_alignment,
             **integrity_update,
         )
 
-    publishable_plan = validate_trade_plan(
+    publishable_plan = plan_integrity if data.strategy_version == SELECTIVE_VERSION else validate_trade_plan(
         direction=data.direction,
-        entry_low=quantize_public_price(_decimal_from(selected.entry_low, "selected.entry_low")),
-        entry_high=quantize_public_price(_decimal_from(selected.entry_high, "selected.entry_high")),
-        entry_reference=quantize_public_price(entry),
-        stop_loss=quantize_public_price(_decimal_from(stop, "stop")),
-        tp1=quantize_public_price(_decimal_from(tp1, "tp1")),
-        tp2=quantize_public_price(_decimal_from(tp2, "tp2")),
-        tp3=quantize_public_price(_decimal_from(tp3, "tp3")),
+        entry_low=_public_price(data, selected.entry_low),
+        entry_high=_public_price(data, selected.entry_high),
+        entry_reference=_public_price(data, entry),
+        stop_loss=_public_price(data, stop),
+        tp1=_public_price(data, tp1),
+        tp2=_public_price(data, tp2),
+        tp3=_public_price(data, tp3),
         entry_reference_type=entry_reference_type,
+        execution_cost=execution_cost,
     )
     if not publishable_plan.valid or publishable_plan.rr is None:
         publishable_update = {
@@ -556,7 +616,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
     )
 
     rr_to_tp2 = _quantize(publishable_plan.rr)
-    if publishable_plan.rr < data.minimum_rr:
+    if not publishable_plan.valid or publishable_plan.rr < data.minimum_rr:
         return _failed_result(
             data,
             "rr_below_minimum",
@@ -587,6 +647,10 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
     return PullbackZoneResult(
         strategy_version=data.strategy_version,
         selective_fib=base_update.get("selective_fib", SelectiveFibEvidence()),
+        stop_evidence=base_update.get("stop_evidence", {}),
+        tp2_source=base_update.get("tp2_source", NA),
+        execution_cost=execution_cost,
+        execution_friction_bps=data.execution_friction_bps if data.strategy_version == SELECTIVE_VERSION else Decimal("0"),
         valid=True,
         direction=data.direction,
         pullback_zone_status="valid",
@@ -666,6 +730,13 @@ def calculate_fib_alignment(
         )
 
     return _fib_alignment_for_levels(normalized_direction, sweep, bos, entry, aggressive_toggle, original_direction=direction)
+
+
+def _public_price(data: PullbackZoneInput, value: Any) -> Decimal:
+    price = _decimal_from(value, "public_price")
+    # The prospective contract keeps verified exchange precision. Display
+    # rounding must not move the stop back into a liquidity boundary.
+    return _quantize(price) if data.strategy_version == SELECTIVE_VERSION else quantize_public_price(price)
 
 
 def _calculation_candle_source(data: PullbackZoneInput) -> tuple[str, Sequence[Any], str]:

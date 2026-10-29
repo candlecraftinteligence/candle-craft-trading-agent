@@ -170,8 +170,11 @@ def _pullback(ratio="0.618", direction="long", **overrides):
     data = _input(candles, direction=direction).model_copy(update=dict(
         strategy_version=SELECTIVE_VERSION, precision_source="/fapi/v1/exchangeInfo",
         structure_confirmed=True, canonical_confirmation=True, confirmation_timeframe="15m",
-        calculation_timeframe="15m", **overrides))
-    return data
+        calculation_timeframe="15m",
+        user_resistance_levels=[D("180"), D("200"), D("220")] if direction == "long" else None,
+        user_support_levels=[D("70"), D("50"), D("30")] if direction == "short" else None,
+        ))
+    return data.model_copy(update=overrides)
 
 
 @pytest.mark.parametrize("direction", ["long", "short"])
@@ -180,7 +183,7 @@ def test_pullback_plan_integration_at_all_targets(ratio, direction):
     result = analyze_pullback_zone(_pullback(ratio, direction))
     assert result.valid, result.pullback_failure_reason
     assert result.trade_plan_integrity == "PASS"
-    assert result.rr_to_tp2 >= D("2.5")
+    assert result.rr_to_tp2 >= D("3.0")
     assert result.entry == result.selective_fib.execution_price
     assert result.entry_low == result.entry_high == result.entry
 

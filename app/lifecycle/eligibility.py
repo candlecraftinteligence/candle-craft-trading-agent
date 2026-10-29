@@ -10,6 +10,7 @@ from typing import Any
 from app.analytics.public_signal_quality import MIN_PUBLIC_SIGNAL_GRADE, public_quality_decision
 from app.data.dtos import NA
 from app.lifecycle.outcome_policy import has_valid_stored_plan_geometry
+from app.core.trade_plan_integrity import validate_public_trade_plan
 
 _MISSING = object()
 
@@ -257,8 +258,8 @@ def has_valid_rr(record: Any, min_rr: Decimal | str | int | float = Decimal("3")
         minimum = Decimal("3")
     rr_value = _trusted_rr(record)
     if rr_value is None:
-        rr_value = _computed_rr_to_tp1(record)
-    return rr_value is not None and rr_value >= minimum
+        rr_value = _computed_rr_to_tp2(record)
+    return rr_value is not None and rr_value >= max(Decimal("3"), minimum)
 
 
 def has_public_quality(record: Any, min_public_grade: str = MIN_PUBLIC_SIGNAL_GRADE) -> bool:
@@ -410,8 +411,9 @@ def is_public_watchlist_candidate(
 
     rr_value = _trusted_rr(candidate)
     if rr_value is None:
-        rr_value = _computed_rr_to_tp1(candidate)
-    minimum_rr = _decimal_or_none(eligibility.public_watchlist_min_rr) or PUBLIC_WATCHLIST_MIN_RR
+        rr_value = _computed_rr_to_tp2(candidate)
+    minimum_rr = max(PUBLIC_WATCHLIST_MIN_RR,
+                     _decimal_or_none(eligibility.public_watchlist_min_rr) or PUBLIC_WATCHLIST_MIN_RR)
     rr_ok = rr_value is not None and rr_value >= minimum_rr
     if rr_value is None:
         reasons.append("missing_rr")
@@ -539,32 +541,25 @@ def _short_optional_target_order(tp1: Decimal, tp2: Decimal | None, tp3: Decimal
 
 
 def _trusted_rr(record: Any) -> Decimal | None:
-    return _decimal_or_none(
+    reported = _decimal_or_none(
         _first_field(record, "rr", "rr_planned", "planned_rr", "best_rr", "rr_to_tp2", ("setup_quality", "best_rr"))
     )
+    computed = _computed_rr_to_tp2(record)
+    if computed is None:
+        return None
+    return min(reported, computed) if reported is not None else computed
 
 
-def _computed_rr_to_tp1(record: Any) -> Decimal | None:
+def _computed_rr_to_tp2(record: Any) -> Decimal | None:
     levels = _trade_levels(record)
     direction = _direction(record)
     if direction not in {"long", "short"}:
         return None
-    if None in (levels.entry_low, levels.entry_high, levels.stop_loss, levels.tp1):
-        return None
-    assert levels.entry_low is not None
-    assert levels.entry_high is not None
-    assert levels.stop_loss is not None
-    assert levels.tp1 is not None
-    entry = (levels.entry_low + levels.entry_high) / Decimal("2")
-    if direction == "long":
-        risk = entry - levels.stop_loss
-        reward = levels.tp1 - entry
-    else:
-        risk = levels.stop_loss - entry
-        reward = entry - levels.tp1
-    if risk <= 0 or reward <= 0:
-        return None
-    return reward / risk
+    plan = validate_public_trade_plan(direction=direction, entry_low=levels.entry_low,
+        entry_high=levels.entry_high, stop_loss=levels.stop_loss,
+        tp1=levels.tp1, tp2=levels.tp2, tp3=levels.tp3,
+        execution_cost=_decimal_or_none(_first_field(record, "execution_cost")) or Decimal("0"))
+    return plan.rr
 
 
 def _direction(record: Any) -> str:

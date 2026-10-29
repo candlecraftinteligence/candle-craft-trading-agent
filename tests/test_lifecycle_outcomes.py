@@ -142,8 +142,11 @@ def _prime(
     direction: str = "long",
     lifecycle_id: str = "life-1",
     mode: str = "challenge",
+    plan_overrides: dict[str, str] | None = None,
 ):
     record = _record(lifecycle_id=lifecycle_id, mode=mode, direction=direction)
+    if plan_overrides:
+        record = record.model_copy(update=plan_overrides)
     repository.upsert_record(record)
     candles = [_baseline(direction)]
     result = _evaluate(repository, record, candles)
