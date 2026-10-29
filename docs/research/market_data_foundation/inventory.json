@@ -245,22 +245,22 @@
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 2491,
+        "line": 2518,
         "contains": "async def _fetch_optional_market_data("
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 4623,
+        "line": 4662,
         "contains": "def _derivatives_enrichment_input("
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 4648,
+        "line": 4687,
         "contains": "def _derivatives_rejection("
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 1726,
+        "line": 1731,
         "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"
       }
     ]
@@ -542,12 +542,12 @@
     "code_refs": [
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 296,
+        "line": 301,
         "contains": "market_regime_enabled: bool = False"
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 2062,
+        "line": 2067,
         "contains": "\"ETHUSDT\", \"eth_candles\""
       }
     ]

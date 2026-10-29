@@ -307,6 +307,11 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         )
         return represent_delivery(value, evidence)
 
+    async def get_price_precision(self, symbol: str):
+        from app.data.instrument_precision import parse_precision
+        payload = await self._get_json(ENDPOINT_BINANCE_EXCHANGE_INFO, params={"symbol": symbol.upper()})
+        return parse_precision(payload, exchange="binance", symbol=symbol.upper())
+
     async def get_instrument_metadata(
         self,
         symbol: str,

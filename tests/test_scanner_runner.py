@@ -370,6 +370,8 @@ def _scan_with_target_intelligence(monkeypatch, target_intelligence: TargetIntel
 def _config(symbols: list[str], **overrides: object) -> ScannerRunConfig:
     data: dict[str, object] = {
         "symbols": symbols,
+        "strategy_version": "liquidity-grab-v1",
+        "htf_timeframe": "2d",
         "exchange": "binance",
         "interval": "15m",
         "candle_limit": 220,

@@ -45,6 +45,8 @@ class SignalEdgeEvidence:
     """Validated strategy facts that may be projected into the public Edge block."""
 
     sweep_present: bool = False
+    strategy_version: Any = NA
+    selected_fib_ratio: Any = NA
     sweep_direction: Any = NA
     swept_level: Any = NA
     sweep_wick: Any = NA
@@ -452,7 +454,9 @@ def _public_edge_strip(message: TelegramSignalMessage) -> str:
 
     zone = _edge_zone_label(evidence.selected_zone_type)
     fib = bool(evidence.fib_aligned)
-    if zone == "order block" and fib:
+    ratio = _decimal_value(evidence.selected_fib_ratio)
+    selective = evidence.strategy_version == "selective-fib-mtf-v2" and ratio in (Decimal("0.618"), Decimal("0.750"), Decimal("0.786"))
+    if zone == "order block" and fib and not selective:
         tokens.append("OB/Fib \u2713")
     else:
         if zone in {"order block", "OB/FVG overlap"}:
@@ -460,7 +464,7 @@ def _public_edge_strip(message: TelegramSignalMessage) -> str:
         if zone in {"FVG", "OB/FVG overlap"}:
             tokens.append("FVG \u2713")
         if fib:
-            tokens.append("Fib \u2713")
+            tokens.append(f"Fib {ratio:.3f} \u2713" if selective else "Fib \u2713")
     return f" {MIDDLE_DOT} ".join(dict.fromkeys(tokens)) if tokens else NA
 
 
@@ -682,6 +686,10 @@ def _public_edge_entry_line(evidence: SignalEdgeEvidence | None) -> str:
         line = f"{subject} overlaps the selected {zone}"
     else:
         line = f"{subject} is aligned with the validated fib pullback zone"
+    if evidence.strategy_version == "selective-fib-mtf-v2":
+        ratio = _decimal_value(evidence.selected_fib_ratio)
+        if ratio in (Decimal("0.618"), Decimal("0.750"), Decimal("0.786")):
+            return f"{line} at the selected {ratio:.3f} Fibonacci target."
     depth = _edge_pullback_depth(evidence.pullback_depth_ratio)
     if depth != NA:
         line += f" at a {depth} retracement"

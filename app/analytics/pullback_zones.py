@@ -17,6 +17,9 @@ from app.analytics.wick_close_structure import (
 from app.core.minimum_rr import CHALLENGE_HARD_MINIMUM_RR, SWING_HARD_MINIMUM_RR
 from app.core.price_precision import quantize_public_price
 from app.core.trade_plan_integrity import validate_trade_plan
+from app.analytics.selective_fibonacci import (
+    LEGACY_VERSION, SELECTIVE_VERSION, StrategyVersion, SelectiveFibEvidence, select_target,
+)
 
 OUTPUT_QUANT = Decimal("0.00000001")
 BASE_MIN_RR = SWING_HARD_MINIMUM_RR
@@ -80,6 +83,10 @@ class PullbackZone(BaseModel):
 
 
 class PullbackZoneInput(BaseModel):
+    strategy_version: StrategyVersion = LEGACY_VERSION
+    precision_source: str = NA
+    structure_confirmed: bool = False
+    canonical_confirmation: bool = False
     symbol: str
     direction: TradeDirection
     execution_timeframe: str
@@ -127,6 +134,8 @@ class PullbackZoneInput(BaseModel):
 
 
 class PullbackZoneResult(BaseModel):
+    strategy_version: StrategyVersion = LEGACY_VERSION
+    selective_fib: SelectiveFibEvidence = SelectiveFibEvidence()
     valid: bool = False
     direction: TradeDirection | Literal["N/A"] = NA
     pullback_zone_status: Literal["valid", "failed", "N/A"] = "N/A"
@@ -271,6 +280,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
     fvg_zone = _detect_fvg(candles, data.direction, sweep_index, bos_index)
 
     base_update = {
+        "strategy_version": data.strategy_version,
         "direction": data.direction,
         **index_update,
         "displacement_start_index": sweep_index,
@@ -292,6 +302,22 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         "pullback_depth_ratio": pullback_depth_ratio if pullback_depth_ratio is not None else NA,
         **wick_close_fields(wick_close_structure),
     }
+
+    if data.strategy_version == SELECTIVE_VERSION:
+        candidates = _candidate_zones(ob_zone, fvg_zone)
+        candidate_index, evidence = select_target(
+            direction=data.direction, start=impulse_start, end=impulse_end, zones=candidates,
+            tick_size=data.tick_size if isinstance(data.tick_size, Decimal) else None,
+            precision_source=data.precision_source, timeframe=calculation_timeframe,
+            candles=candles, sweep_index=sweep_index, bos_index=bos_index,
+            structure_confirmed=data.structure_confirmed, canonical_confirmation=data.canonical_confirmation,
+        )
+        base_update["selective_fib"] = evidence
+        selected = None if candidate_index is None else candidates[candidate_index].model_copy(update={
+            "entry_low": evidence.intersection_low, "entry_high": evidence.intersection_high,
+            "fib_min": evidence.calculated_price, "fib_max": evidence.calculated_price,
+            "fib_alignment_status": "selective_target", "confluence": evidence.structural_confluence,
+        })
 
     if wick_close_structure.acceptance_status == AcceptanceStatus.STRUCTURAL_BREAKDOWN.value:
         return _failed_result(
@@ -344,7 +370,14 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
             fib_alignment=fib_alignment,
         )
 
-    selected = _select_zone(data, ob_zone, fvg_zone, fib_levels)
+    if data.strategy_version == SELECTIVE_VERSION:
+        if not evidence.execution_eligible:
+            return _failed_result(data, evidence.rejection_reasons[0], "; ".join(evidence.rejection_reasons),
+                                  **base_update, selected_zone=selected or PullbackZone(),
+                                  selected_zone_type=selected.zone_type if selected else NA,
+                                  fib_alignment=fib_alignment)
+    else:
+        selected = _select_zone(data, ob_zone, fvg_zone, fib_levels)
     if selected is None:
         return _failed_result(
             data,
@@ -361,6 +394,14 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
 
     entry = _entry_price(data.direction, selected)
     fib_alignment = _fib_alignment_for_levels(data.direction, impulse_start, impulse_end, entry, data.aggressive_toggle)
+    if data.strategy_version == SELECTIVE_VERSION:
+        evidence = base_update["selective_fib"]
+        fib_alignment = FibAlignmentResult(
+            is_aligned=True, direction=data.direction, retracement=evidence.selected_ratio,
+            preferred_low=evidence.calculated_price, preferred_high=evidence.calculated_price,
+            fib_min=evidence.calculated_price, fib_max=evidence.calculated_price,
+            status="selective_target", reason=f"Selected {evidence.selected_ratio} with {selected.zone_type} confluence.",
+        )
     if not fib_alignment.is_aligned:
         return _failed_result(
             data,
@@ -472,6 +513,10 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
             **publishable_update,
         )
 
+    if data.strategy_version == SELECTIVE_VERSION and publishable_plan.entry_reference != entry:
+        return _failed_result(data, "selective_price_rounding", "Public price rounding changed the selected tick price.",
+                              **base_update, fib_alignment=fib_alignment)
+
     entry = publishable_plan.entry_reference
     stop = publishable_plan.stop_loss
     tp1 = publishable_plan.tp1
@@ -526,6 +571,8 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         }
     )
     return PullbackZoneResult(
+        strategy_version=data.strategy_version,
+        selective_fib=base_update.get("selective_fib", SelectiveFibEvidence()),
         valid=True,
         direction=data.direction,
         pullback_zone_status="valid",
@@ -622,12 +669,23 @@ def _calculation_candle_source(data: PullbackZoneInput) -> tuple[str, Sequence[A
 
 def _failed_result(data: PullbackZoneInput, gate: str, reason: str, **updates: Any) -> PullbackZoneResult:
     payload: dict[str, Any] = {
+        "strategy_version": data.strategy_version,
         "direction": data.direction,
         "first_failed_gate": gate,
         "pullback_failure_reason": reason,
         "pullback_zone_status": "failed",
     }
     payload.update(updates)
+    if data.strategy_version == SELECTIVE_VERSION:
+        evidence = payload.get("selective_fib") or SelectiveFibEvidence(
+            strategy_version=SELECTIVE_VERSION, direction=data.direction,
+            timeframe=payload.get("calculation_timeframe", data.calculation_timeframe),
+            impulse_start=payload.get("impulse_start", NA), impulse_end=payload.get("impulse_end", NA),
+        )
+        payload["selective_fib"] = evidence.model_copy(update={
+            "execution_eligible": False,
+            "rejection_reasons": tuple(dict.fromkeys((*evidence.rejection_reasons, gate))),
+        })
     return PullbackZoneResult(**payload)
 
 
