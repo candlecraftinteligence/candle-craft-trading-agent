@@ -47,7 +47,7 @@ from app.alerts.watchlist_expiry import (
 )
 from app.core.config import Settings
 from app.core.confirmed_data_health import confirmed_data_health_for_symbol
-from app.core.trade_plan_integrity import validate_trade_plan
+from app.core.trade_plan_integrity import validate_trade_plan, validate_public_trade_plan
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
     SignalEdgeEvidence,
@@ -6032,7 +6032,7 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
             stop_loss=stop_loss,
         ),
         confluence=_human_confluence_sentence(symbol_result, diagnostics),
-        htf_bias=_first_non_na(diagnostics.get("htf_2d_trend"), diagnostics.get("mtf_12h_trend")),
+        htf_bias=_first_non_na(diagnostics.get("htf_1d_trend") if diagnostics.get("htf_timeframe") == "1d" else diagnostics.get("htf_2d_trend"), diagnostics.get("mtf_12h_trend")),
         ob_fvg_status=_first_non_na(
             diagnostics.get("selected_zone_type"),
             diagnostics.get("ob_fvg_status"),
@@ -6583,6 +6583,8 @@ def _signal_edge_evidence(
         "BOS" if symbol_result.bos_detected and not symbol_result.choch_detected else NA,
     )
     return SignalEdgeEvidence(
+        strategy_version=diagnostics.get("strategy_version", NA),
+        selected_fib_ratio=_field(diagnostics.get("selective_fib"), "selected_ratio"),
         sweep_present=_context_positive(_field(sweep, "is_present")) or _context_any_positive(
             diagnostics,
             "liquidity_sweep_detected",
@@ -10875,7 +10877,25 @@ def _defensive_delivery_blockers(
     if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
         return ()
 
-    blockers: list[str] = []
+    diagnostics = _representative_diagnostics(symbol_result)
+    plan = validate_public_trade_plan(direction=message.direction,
+        entry_low=message.entry_low, entry_high=message.entry_high, stop_loss=message.stop_loss,
+        tp1=message.tp1, tp2=message.tp2, tp3=message.tp3, minimum_rr=context.min_rr,
+        execution_cost=_decimal_or_none(diagnostics.get("execution_cost")) or Decimal("0"))
+    economic_blockers = () if plan.valid else (f"confirmed_economic_plan:{plan.reason}",)
+    claimed_rr = _decimal_or_none(message.planned_rr)
+    if claimed_rr is not None and plan.rr is not None and claimed_rr > plan.rr + Decimal("0.00000001"):
+        economic_blockers += ("confirmed_tp2_rr_overstated",)
+    blockers: list[str] = list(economic_blockers)
+    progress = symbol_result.lifecycle_outcome_progress
+    if progress is not None:
+        try:
+            entry_metadata = json.loads(progress.metadata_json)
+        except (ValueError, TypeError):
+            entry_metadata = {}
+        if (entry_metadata.get("execution_semantics") == "simulated_price_contact"
+                and _status_key(diagnostics.get("confirmation_structure_shift_status")) != "passed"):
+            blockers.append("simulated_contact_not_structural_confirmation")
     rejection_context = _confirmed_rejection_context(symbol_result, message)
     quality_blockers = _public_quality_gate_blockers(symbol_result)
     blockers.extend(quality_blockers)
@@ -15125,6 +15145,19 @@ def _derivatives_confluence_text(symbol_result: ScannerSymbolResult, diagnostics
 
 
 def _derivatives_status(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    context = symbol_result.derivatives_supporting_context
+    if context is not None:
+        metrics = context.get("metrics", {})
+        parts = []
+        for key, label in (("funding_rate", "Funding"), ("oi_change_pct", "OI change"), ("account_ratio", "Account ratio")):
+            metric = metrics.get(key, {})
+            status = metric.get("status", "MISSING")
+            if status == "VERIFIED":
+                unit = "%" if key == "oi_change_pct" else " (rate)" if key == "funding_rate" else ""
+                parts.append(f"{label} {metric['value']}{unit}")
+            else:
+                parts.append(f"{label} N/A ({status.title()})")
+        return "; ".join(parts) + f". Optional observations as of {context.get('observed_at', NA)}; not entry confirmation."
     parts = [
         _first_non_na(diagnostics.get("funding_context"), symbol_result.funding_status),
         _first_non_na(diagnostics.get("oi_context"), symbol_result.oi_direction),

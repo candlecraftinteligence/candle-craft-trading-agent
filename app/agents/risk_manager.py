@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from app.data.dtos import NA, MaybeDecimal
+from app.core.trade_plan_integrity import validate_public_trade_plan
 
 Direction = Literal["long", "short"]
 DecisionStatus = Literal["approved", "rejected"]
@@ -36,6 +37,8 @@ class RiskManagerInput(BaseModel):
     current_daily_loss_pct: Decimal | None = None
     data_quality_score: Decimal | None = None
     invalidation_reason: str | None = None
+    execution_cost: Decimal = Decimal("0")
+    minimum_tp2_rr: Decimal | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -115,6 +118,16 @@ class RiskManagerAgent:
         position_sizing = _calculate_position_sizing(risk_input)
         risk_reward = _calculate_risk_reward(risk_input, position_sizing.risk_per_unit)
         best_rr = _best_risk_reward(risk_reward)
+        if risk_input.minimum_tp2_rr is not None:
+            targets = risk_input.take_profit_targets
+            public_plan = validate_public_trade_plan(direction=risk_input.direction,
+                entry_low=risk_input.entry_price, entry_high=risk_input.entry_price, stop_loss=risk_input.stop_loss,
+                tp1=targets[0] if targets else None, tp2=targets[1] if len(targets) > 1 else None,
+                tp3=targets[2] if len(targets) > 2 else None, minimum_rr=risk_input.minimum_tp2_rr,
+                execution_cost=risk_input.execution_cost)
+            if not public_plan.valid:
+                violations.append(RiskRuleViolation(code="tp2_rr_below_minimum",
+                    message=f"Final public plan rejected: {public_plan.reason}."))
 
         if best_rr != NA and best_rr < MIN_RISK_REWARD_RATIO:
             violations.append(
@@ -157,6 +170,8 @@ def _normalize_input(setup: RiskManagerInput | Mapping[str, Any] | None, overrid
 
 def _hard_rule_violations(setup: RiskManagerInput) -> list[RiskRuleViolation]:
     violations: list[RiskRuleViolation] = []
+    if not setup.execution_cost.is_finite() or setup.execution_cost < 0:
+        violations.append(RiskRuleViolation(code="unverified_execution_cost", message="Execution cost must be finite and nonnegative."))
 
     if setup.account_equity <= 0:
         violations.append(
@@ -300,7 +315,7 @@ def _calculate_position_sizing(setup: RiskManagerInput) -> PositionSizingResult:
 
     if risk_amount != NA and risk_per_unit != NA and risk_per_unit > 0:
         raw_position_size = risk_amount / risk_per_unit
-        position_size = _quantize(raw_position_size)
+        position_size = raw_position_size.quantize(OUTPUT_QUANT, rounding=ROUND_DOWN)
         notional_value = _quantize(raw_position_size * setup.entry_price)
 
     return PositionSizingResult(
@@ -323,7 +338,7 @@ def _calculate_risk_reward(setup: RiskManagerInput, risk_per_unit: MaybeDecimal)
             )
             continue
 
-        reward = target - setup.entry_price if setup.direction == "long" else setup.entry_price - target
+        reward = (target - setup.entry_price if setup.direction == "long" else setup.entry_price - target) - setup.execution_cost
         ratio = reward / risk_per_unit
         quantized_ratio = _quantize(ratio)
         results.append(
@@ -371,6 +386,8 @@ def _classify_leverage(leverage: Decimal | None) -> LeverageRiskResult:
 
 
 def _risk_per_unit(setup: RiskManagerInput) -> MaybeDecimal:
+    if not setup.execution_cost.is_finite() or setup.execution_cost < 0:
+        return NA
     if setup.entry_price <= 0 or setup.stop_loss <= 0:
         return NA
     if setup.direction == "long":
@@ -379,7 +396,7 @@ def _risk_per_unit(setup: RiskManagerInput) -> MaybeDecimal:
         risk_per_unit = setup.stop_loss - setup.entry_price
     if risk_per_unit <= 0:
         return NA
-    return risk_per_unit
+    return risk_per_unit + setup.execution_cost
 
 
 def _normalized_invalidation(setup: RiskManagerInput) -> str:

@@ -470,7 +470,7 @@ def test_r129_legitimate_later_same_setup_raw_may_enrich(tmp_path: Path) -> None
                 "entry_high": "102",
                 "stop_loss": "95",
                 "tp1": "110",
-                "tp2": "120",
+                "tp2": "126.5",
                 "tp3": "130",
                 "setup_quality": {"quality_grade": "A", "decision_reason": "OWNED_GATE_MARKER"},
                 "trade_idea": {
@@ -480,7 +480,7 @@ def test_r129_legitimate_later_same_setup_raw_may_enrich(tmp_path: Path) -> None
                     "entry_high": "102",
                     "stop_loss": "95",
                     "tp1": "110",
-                    "tp2": "120",
+                    "tp2": "126.5",
                     "tp3": "130",
                     "reason_for_trade": later_rationale,
                     "invalidation": OWNED_INVALIDATION,

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.trade_plan_integrity import validate_trade_plan
 from app.data.dtos import NA, MaybeDecimal
@@ -43,6 +43,7 @@ class TradeIdeaInput(BaseModel):
     opportunity_decision: OpportunityDecision
     risk_approved: bool
     best_rr: Decimal
+    execution_cost: Decimal = Field(default=Decimal("0"), ge=0)
     technical_summary: str | None = None
     derivatives_summary: str | None = None
     confirmed_facts: tuple[str, ...] = ()
@@ -54,7 +55,7 @@ class TradeIdeaInput(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    @field_validator("opportunity_score", "best_rr")
+    @field_validator("opportunity_score", "best_rr", "execution_cost")
     @classmethod
     def _decimal_is_finite(cls, value: Decimal) -> Decimal:
         if not value.is_finite():
@@ -136,6 +137,7 @@ class TradeIdeaResult(BaseModel):
     invalidation: str
     take_profits: tuple[TakeProfitLevel, ...]
     best_rr: Decimal
+    execution_cost: Decimal = Field(default=Decimal("0"), ge=0)
     confidence_score: Decimal
     grade: str
     reason_for_trade: str
@@ -184,6 +186,7 @@ class TradeIdeaAgent:
             invalidation=_optional_text(trade_input.invalidation),
             take_profits=_take_profits(trade_input.take_profit_targets),
             best_rr=_quantize(trade_input.best_rr),
+            execution_cost=trade_input.execution_cost,
             confidence_score=_quantize(trade_input.opportunity_score),
             grade=trade_input.opportunity_grade,
             reason_for_trade=_reason_for_trade(context),

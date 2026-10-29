@@ -239,7 +239,7 @@ def test_limit_hit_in_later_iteration_sends_one_short_follow_up(tmp_path) -> Non
     assert initial.sent == 1
     assert follow_up.sent == 1
     assert len(sender.messages) == 2
-    assert sender.messages[-1].startswith("🎯 BTCUSDT · ZONE ENGAGED")
+    assert sender.messages[-1].startswith("🎯 BTCUSDT · ENTRY ZONE TOUCHED")
     assert "Price has reached the mapped territory." in sender.messages[-1]
     assert "SIGNAL CONFIRMED" not in sender.messages[-1]
 
@@ -250,7 +250,7 @@ def test_confirmed_formatter_matches_compact_contract_and_structured_edge_only()
     assert text == (
         "🐺 ICPUSDT · LONG · SCALP/SWING\n\n"
         "🟢 SIGNAL CONFIRMED\n\n"
-        "A · Score 91 · 3.22R\n\n"
+        "A · Score 91 · TP2 RR 3.22R\n\n"
         "━━━━━━━━━━━━━\n\n"
         "🎯 ENTRY 2.391 – 2.395\n\n"
         "🛡 SL 2.3765\n\n"
@@ -258,11 +258,15 @@ def test_confirmed_formatter_matches_compact_contract_and_structured_edge_only()
         "TP2 2.4282\n\n"
         "TP3 2.44\n\n"
         "━━━━━━━━━━━━━\n\n"
+        "Market bias: N/A\n"
+        "Derivatives: N/A\n\n"
         "🧠 EDGE\n\n"
         "Sweep ✓ · BOS ✓ · OB/Fib ✓\n\n"
         "⚔️ EXECUTION\n\n"
-        "Wait for the mapped zone. No chase.\n\n"
-        "🐺 Hunt live.\n\n"
+        "If you choose to enter, use only the mapped zone and size from stop-loss risk.\n"
+        "Wait for the mapped zone; reassess if structure changes. No chase.\n\n"
+        "Invalidation: hard stop on price contact at or below 2.3765.\n"
+        "Price contact is observed; your entry and exchange fill are Unverified.\n\n"
         "Risk warning: Not financial advice. Trading can result in losses.\n\n"
         "CCI · Signal. Structure. Execution."
     )
@@ -284,12 +288,12 @@ def test_confirmed_formatter_matches_compact_contract_and_structured_edge_only()
 
 
 def test_zone_and_outcome_formatter_examples() -> None:
-    assert "Zone active. Watch the reaction. No chase." in format_telegram_signal_message(
+    assert "Zone touched. Use the confirmed plan only while structure remains valid. No chase." in format_telegram_signal_message(
         TelegramAlertType.SIGNAL_CONFIRMED,
         replace(_message(), zone_active=True),
     )
     assert format_telegram_signal_message(TelegramAlertType.LIMIT_HIT, _message()).startswith(
-        "🎯 ICPUSDT · ZONE ENGAGED\n\nEntry 2.391 – 2.395"
+        "🎯 ICPUSDT · ENTRY ZONE TOUCHED\n\nEntry 2.391 – 2.395"
     )
     assert "Next → TP2 2.4282" in format_telegram_signal_message(
         TelegramAlertType.TP1_HIT, _message()
@@ -337,7 +341,7 @@ def test_tp1_and_tp2_between_scans_send_one_consolidated_tp2(tmp_path) -> None:
     summary = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
 
     assert summary.sent == 1
-    assert "🔥 BTCUSDT · TP2 SECURED" in sender.messages[-1]
+    assert "🔥 BTCUSDT · TP2 REACHED" in sender.messages[-1]
     assert "TP1 ✓ · TP2 ✓" in sender.messages[-1]
     assert [item.alert_type for item in _sent_outcomes(db_path)] == [
         TelegramAlertType.TP2_HIT.value
@@ -360,7 +364,7 @@ def test_restart_with_tp1_and_tp2_persisted_sends_one_consolidated_tp2(tmp_path)
     assert summary.sent == 1
     assert repeated.sent == 0
     assert len(restarted_sender.messages) == 1
-    assert "🔥 BTCUSDT · TP2 SECURED" in restarted_sender.messages[0]
+    assert "🔥 BTCUSDT · TP2 REACHED" in restarted_sender.messages[0]
     assert "TP1 ✓ · TP2 ✓" in restarted_sender.messages[0]
 
 

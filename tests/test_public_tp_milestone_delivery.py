@@ -411,8 +411,8 @@ def test_multiple_canonical_targets_are_consolidated_to_highest_once(tmp_path, t
     assert first.sent == 1
     assert repeated.sent == 0
     assert [item.alert_type for item in _sent_outcomes(db_path)] == expected
-    assert sum("TP1 SECURED" in message for message in sender.messages) == 0
-    assert sum("TP2 SECURED" in message for message in sender.messages) == (tp_count == 2)
+    assert sum("TP1 REACHED" in message for message in sender.messages) == 0
+    assert sum("TP2 REACHED" in message for message in sender.messages) == (tp_count == 2)
     assert sum("FULL TARGET" in message for message in sender.messages) == (tp_count == 3)
 
 

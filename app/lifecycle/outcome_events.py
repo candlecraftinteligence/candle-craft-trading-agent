@@ -64,7 +64,7 @@ def advance_to_managing(
                 event_type="entry_state_progression",
                 causal=causal,
                 plan_identity=plan_identity,
-                policy_reason=NA,
+                policy_reason="simulated_price_contact; no exchange fill or user execution is verified",
                 level=NA,
             ),
         )

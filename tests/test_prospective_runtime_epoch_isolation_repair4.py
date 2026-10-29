@@ -168,7 +168,7 @@ def _insert_candidate(
         INSERT INTO setup_candidates (
             run_id, symbol, mode, direction, entry, stop, tp1, tp2, tp3, rr,
             invalidation, quality_grade, trust_meter, risk_warning, raw_candidate_json
-        ) VALUES (?, ?, 'swing', ?, '100-102', '95', '110', '120', '130', '3.5',
+        ) VALUES (?, ?, 'swing', ?, '100-102', '95', '110', '126.5', '130', '3.5',
                   ?, ?, 'N/A', 'N/A', ?)
         """,
         (
@@ -216,7 +216,7 @@ def _seed_positive_active_detail(db_path: Path, *, label: str) -> tuple[int, str
                     "last_seen_at": fresh,
                     "last_transition_at": fresh,
                     "tp1": "110",
-                    "tp2": "120",
+                    "tp2": "126.5",
                     "tp3": "130",
                     "rr": "3.5",
                     "quality_grade_current": "A",
@@ -281,7 +281,7 @@ def _seed_positive_active_detail(db_path: Path, *, label: str) -> tuple[int, str
                 entry_high="102",
                 stop_loss="95",
                 tp1="110",
-                tp2="120",
+                tp2="126.5",
                 tp3="130",
                 attempted_alert_type="SIGNAL_CONFIRMED",
             )
@@ -1043,6 +1043,7 @@ def test_r114_post_migration_integrity_checks_pass(tmp_path: Path) -> None:
 
 def _identity_cli(db_path: Path) -> list[str]:
     return [
+        "--strategy-version", "liquidity-grab-v1", "--htf-timeframe", "2d",
         "--database-path",
         str(db_path),
         "--runtime-epoch-id",

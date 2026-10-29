@@ -31,6 +31,7 @@ from app.watch_supervisor import (
     FatalWatchIterationError,
     WatchFailureDisposition,
     classify_watch_exception,
+    discovery_retry_backoff_seconds,
     failure_backoff_seconds,
     schedule_after_iteration,
 )
@@ -103,6 +104,22 @@ def test_failure_backoff_is_deterministic_bounded_and_resets() -> None:
     assert [failure_backoff_seconds(item) for item in range(1, 5)] == [5, 10, 20, 40]
     assert failure_backoff_seconds(20) == 300
     assert failure_backoff_seconds(0) == 0
+
+
+def test_discovery_retry_backoff_is_finite_and_jittered() -> None:
+    assert discovery_retry_backoff_seconds(0, jitter=1.0) == 0.0
+    assert discovery_retry_backoff_seconds(1, jitter=0.0) == 2.5
+    assert discovery_retry_backoff_seconds(1, jitter=1.0) == 5.0
+    assert discovery_retry_backoff_seconds(20, jitter=1.0) == 300.0
+    assert discovery_retry_backoff_seconds(20, jitter=0.0) == 150.0
+    low = discovery_retry_backoff_seconds(3, jitter=0.25)
+    high = discovery_retry_backoff_seconds(3, jitter=0.75)
+    ceiling = failure_backoff_seconds(3)
+    assert 0 < low < high <= ceiling
+    wrapped = SystemExit("temporary universe failure")
+    wrapped.__cause__ = UniverseResolutionError("temporary universe failure")
+    assert classify_watch_exception(wrapped) == WatchFailureDisposition.RECOVERABLE
+    assert classify_watch_exception(SystemExit("bad args")) == WatchFailureDisposition.FATAL
 
 
 def test_failure_backoff_combines_with_cadence_without_tight_loop() -> None:

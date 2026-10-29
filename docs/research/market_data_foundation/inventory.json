@@ -30,7 +30,7 @@
     "code_refs": [
       {
         "path": "app/data/exchange_clients/binance_futures.py",
-        "line": 105,
+        "line": 110,
         "contains": "\"/fapi/v1/klines\""
       },
       {
@@ -40,7 +40,7 @@
       },
       {
         "path": "app/cache/market_data_cache.py",
-        "line": 59,
+        "line": 61,
         "contains": "\"candles\": 60"
       }
     ]
@@ -153,7 +153,7 @@
     "code_refs": [
       {
         "path": "app/data/exchange_clients/binance_futures.py",
-        "line": 138,
+        "line": 143,
         "contains": "\"/fapi/v1/ticker/24hr\""
       },
       {
@@ -163,7 +163,7 @@
       },
       {
         "path": "app/cache/market_data_cache.py",
-        "line": 60,
+        "line": 62,
         "contains": "\"ticker\": 15"
       }
     ]
@@ -245,22 +245,22 @@
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 2491,
+        "line": 2561,
         "contains": "async def _fetch_optional_market_data("
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 4623,
+        "line": 4761,
         "contains": "def _derivatives_enrichment_input("
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 4648,
+        "line": 4786,
         "contains": "def _derivatives_rejection("
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 1726,
+        "line": 1761,
         "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"
       }
     ]
@@ -383,7 +383,7 @@
       },
       {
         "path": "app/core/config.py",
-        "line": 91,
+        "line": 93,
         "contains": "microstructure_flow_enabled: bool = False"
       }
     ]
@@ -424,7 +424,7 @@
       },
       {
         "path": "app/core/config.py",
-        "line": 97,
+        "line": 99,
         "contains": "order_book_liquidity_enabled: bool = False"
       }
     ]
@@ -465,7 +465,7 @@
       },
       {
         "path": "app/core/config.py",
-        "line": 94,
+        "line": 96,
         "contains": "liquidation_flow_enabled: bool = False"
       }
     ]
@@ -506,7 +506,7 @@
       },
       {
         "path": "app/core/config.py",
-        "line": 83,
+        "line": 85,
         "contains": "btc_context_enabled: bool = True"
       }
     ]
@@ -542,12 +542,12 @@
     "code_refs": [
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 296,
+        "line": 305,
         "contains": "market_regime_enabled: bool = False"
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 2062,
+        "line": 2103,
         "contains": "\"ETHUSDT\", \"eth_candles\""
       }
     ]
@@ -696,17 +696,17 @@
     "code_refs": [
       {
         "path": "app/universe/symbol_universe.py",
-        "line": 588,
+        "line": 612,
         "contains": "\"/tickers\""
       },
       {
         "path": "app/universe/symbol_universe.py",
-        "line": 514,
+        "line": 526,
         "contains": "qualified_rank_above_cohort"
       },
       {
         "path": "app/universe/symbol_universe.py",
-        "line": 760,
+        "line": 784,
         "contains": "STABLECOIN_BASES"
       }
     ]
@@ -747,7 +747,7 @@
       },
       {
         "path": "app/core/config.py",
-        "line": 87,
+        "line": 89,
         "contains": "macro_event_context_enabled: bool = True"
       }
     ]
@@ -880,12 +880,12 @@
     "code_refs": [
       {
         "path": "scripts/run_scan.py",
-        "line": 618,
+        "line": 627,
         "contains": "default=60.0"
       },
       {
         "path": "app/watch_supervisor.py",
-        "line": 82,
+        "line": 107,
         "contains": "first_next_start = scheduled + interval"
       }
     ]

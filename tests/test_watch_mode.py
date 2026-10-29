@@ -232,8 +232,8 @@ def _watch_lifecycle_record(state: SetupLifecycleState = SetupLifecycleState.ACT
         "entry_high": "102",
         "stop_loss": "95",
         "tp1": "110",
-        "tp2": "115",
-        "tp3": "120",
+        "tp2": "123",
+        "tp3": "130",
         "rr": "3",
         "quality_grade_current": "A",
         "actionability_state": "A_GRADE_ACTIONABLE",
@@ -795,6 +795,17 @@ def test_watch_universe_refreshes_each_iteration(tmp_path, monkeypatch) -> None:
         ("ITER2AUSDT", "ITER2BUSDT"),
     ]
     _patch_watch_runtime(tmp_path, monkeypatch, symbols=sequences[0], db_path=db_path)
+    resources = []
+    class PublicPool:
+        closed = False
+        async def aclose(self):
+            self.closed = True
+    pool = PublicPool()
+    class RecordingRunner(EchoWatchRunner):
+        def __init__(self, **kwargs):
+            resources.append((kwargs["exchange_client"], kwargs["market_data_cache"]))
+    monkeypatch.setattr(run_scan, "_public_exchange_client", lambda _args: pool)
+    monkeypatch.setattr(run_scan, "ScannerRunner", RecordingRunner)
 
     async def resolve_universe(mode, *, universe_size, min_quote_volume):
         index = min(resolve_universe.calls, len(sequences) - 1)
@@ -825,10 +836,14 @@ def test_watch_universe_refreshes_each_iteration(tmp_path, monkeypatch) -> None:
         )
     )
 
-    assert [_config_symbols(config) for config in EchoWatchRunner.configs] == [
+    assert [_config_symbols(config) for config in RecordingRunner.configs] == [
         sequences[1],
         sequences[2],
     ]
+    assert len(resources) == 2 and all(client is pool for client, _cache in resources)
+    assert resources[0][1] is resources[1][1] and resources[0][1] is not None
+    assert not resources[0][1]._inflight
+    assert pool.closed
 
 
 def test_lifecycle_priority_promotes_without_shrinking_universe(tmp_path, monkeypatch) -> None:
@@ -1387,6 +1402,7 @@ def test_recoverable_universe_iteration_failure_continues_and_later_succeeds(
         monotonic[0] += seconds
 
     monkeypatch.setattr(run_scan, "resolve_symbol_universe", flaky_resolver)
+    monkeypatch.setattr(run_scan, "_discovery_retry_jitter", lambda: 1.0)
     monkeypatch.setattr(run_scan, "time", SimpleNamespace(monotonic=lambda: monotonic[0]))
     monkeypatch.setattr(run_scan.asyncio, "sleep", fake_sleep)
     args = _watch_args(db_path, universe_size=1)

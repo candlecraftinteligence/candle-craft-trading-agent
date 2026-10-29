@@ -4,12 +4,13 @@ import argparse
 import asyncio
 import inspect
 import json
+import random
 import sys
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -127,6 +128,8 @@ from app.lifecycle.service import (  # noqa: E402
     active_lifecycle_symbols,
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository  # noqa: E402
+from app.analytics.selective_fibonacci import LEGACY_VERSION, SELECTIVE_VERSION
+from app.strategies.context_fields import htf_value, htf_label
 from app.pipeline.scanner_runner import (  # noqa: E402
     DEFAULT_CONFIRMATION_TIMEFRAME,
     DEFAULT_STRUCTURE_TIMEFRAME,
@@ -228,12 +231,17 @@ from app.watch_supervisor import (  # noqa: E402
     FatalWatchIterationError, WatchFailureDisposition,
     WatchIterationStatus,
     classify_watch_exception,
+    discovery_retry_backoff_seconds,
     failure_backoff_seconds,
     schedule_after_iteration,
 )
 
 
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+# ScannerRunConfig rejects an empty symbol list. This placeholder keeps the
+# config constructable while discovery is down. It is not exchange membership
+# and must never be queued for a scan.
+_DISCOVERY_CONFIG_PLACEHOLDER = "CCI_DISCOVERY_UNVERIFIED"
 LATEST_RUN_PATH = DEFAULT_LATEST_RUN_PATH
 WATCH_STATE_PATH = DEFAULT_WATCH_STATE_PATH
 WATCH_STATE_CANONICAL_BASE_DIR = DEFAULT_WATCH_STATE_PATH.parent
@@ -311,9 +319,9 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
     "daily": CommandPreset(
         name="daily",
         modes=("challenge", "swing", "scalp"),
-        htf_timeframe="2d",
+        htf_timeframe="1d",
         bias_timeframe="12h",
-        structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
+        structure_timeframe="4h",
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
@@ -328,9 +336,9 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
     "swing": CommandPreset(
         name="swing",
         modes=("swing",),
-        htf_timeframe="2d",
+        htf_timeframe="1d",
         bias_timeframe="12h",
-        structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
+        structure_timeframe="4h",
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
@@ -345,9 +353,9 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
     "challenge": CommandPreset(
         name="challenge",
         modes=("challenge",),
-        htf_timeframe="2d",
+        htf_timeframe="1d",
         bias_timeframe="12h",
-        structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
+        structure_timeframe="4h",
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="85",
@@ -362,9 +370,9 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
     "scalp": CommandPreset(
         name="scalp",
         modes=("scalp",),
-        htf_timeframe="12h",
-        bias_timeframe="4h",
-        structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
+        htf_timeframe="1d",
+        bias_timeframe="12h",
+        structure_timeframe="4h",
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
@@ -553,9 +561,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-rr", type=_minimum_rr_arg, default=DEFAULT_CONFIGURED_MINIMUM_RR)
     parser.add_argument("--strategy", choices=["liquidity_grab_pullback"], default="liquidity_grab_pullback")
     parser.add_argument("--modes", nargs="+", choices=["challenge", "swing", "scalp"], default=["challenge", "swing", "scalp"])
-    parser.add_argument("--htf-timeframe", default="2d")
+    parser.add_argument("--strategy-version", choices=[LEGACY_VERSION, SELECTIVE_VERSION], default=SELECTIVE_VERSION)
+    parser.add_argument("--htf-timeframe", default="1d")
     parser.add_argument("--bias-timeframe", default="12h")
-    parser.add_argument("--structure-timeframe", default=DEFAULT_STRUCTURE_TIMEFRAME)
+    parser.add_argument("--structure-timeframe", default="4h")
     parser.add_argument("--execution-timeframe", default="15m")
     parser.add_argument("--confirmation-timeframe", default=DEFAULT_CONFIRMATION_TIMEFRAME)
     parser.add_argument("--aggressive-toggle", action="store_true")
@@ -785,15 +794,19 @@ async def main(argv: Sequence[str] | None = None) -> None:
         args.list_command_presets or args.list_presets or args.research
         or args.show_history or args.export_history_json is not None
     )
-    if args.watch and (args.reset_lifecycle or not report_only):
-        with WatchSession(
-            args.database_path, interval_seconds=args.watch_interval_sec,
-            on_observation=lambda row: append_session_observation(args.database_path, row),
-            on_advisory=print,
-        ) as session:
-            await _main(args, argv=argv, session=session)
-    else:
-        await _main(args, argv=argv)
+    try:
+        if args.watch and (args.reset_lifecycle or not report_only):
+            with WatchSession(
+                args.database_path, interval_seconds=args.watch_interval_sec,
+                on_observation=lambda row: append_session_observation(args.database_path, row),
+                on_advisory=print,
+            ) as session:
+                await _main(args, argv=argv, session=session)
+        else:
+            await _main(args, argv=argv)
+    finally:
+        from app.cmc.runtime import close_services
+        await close_services()
 
 
 async def _main(
@@ -820,9 +833,14 @@ async def _main(
     try:
         watchlist = await _resolve_watchlist_for_args(args)
     except (Exception, SystemExit) as exc:
-        if discovery_failure_continues_owner_monitoring(exc):
-            await _surface_monitoring_during_discovery_failure(args, exc)
-        raise
+        if args.watch and discovery_failure_continues_owner_monitoring(exc):
+            # Stay inside this watch session. The loop retries discovery and
+            # monitors owned plans; the placeholder is not scan membership.
+            watchlist = _discovery_unavailable_watchlist(args, exc)
+        else:
+            if discovery_failure_continues_owner_monitoring(exc):
+                await _surface_monitoring_during_discovery_failure(args, exc)
+            raise
     watchlist = _watchlist_with_lifecycle_priority(args, watchlist)
     diagnostics_level = args.diagnostics_level
     if args.verbose and not args.diagnostics_level_explicit:
@@ -834,7 +852,7 @@ async def _main(
 
     config = ScannerRunConfig(
         cmc_mode=runtime_settings.cmc_mode,
-        symbols=watchlist.symbols,
+        symbols=watchlist.symbols or (_DISCOVERY_CONFIG_PLACEHOLDER,),
         exchange=args.exchange,
         interval=args.interval,
         candle_limit=effective_candle_limit,
@@ -850,6 +868,7 @@ async def _main(
         include_formatted_strategy_output=True,
         aggressive_toggle=args.aggressive_toggle,
         htf_timeframe=args.htf_timeframe,
+        strategy_version=args.strategy_version,
         bias_timeframe=args.bias_timeframe,
         structure_timeframe=args.structure_timeframe,
         execution_timeframe=args.execution_timeframe,
@@ -1688,6 +1707,7 @@ async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistReso
             args.universe,
             universe_size=args.universe_size,
             min_quote_volume=args.min_quote_volume,
+            **({"market_cap_provider": "cmc"} if Settings().market_cap_provider == "cmc" else {}),
         )
         include_symbols = validate_symbols(args.include_symbols, context="--include-symbols")
         exclude_symbols = set(validate_symbols(args.exclude_symbols, context="--exclude-symbols"))
@@ -2628,6 +2648,10 @@ def _apply_lifecycle_if_enabled(
 
 
 def _owner_monitoring_client(args: argparse.Namespace) -> Any:
+    return _public_exchange_client(args)
+
+
+def _public_exchange_client(args: argparse.Namespace) -> Any:
     timeout = float(getattr(args, "request_timeout_sec", DEFAULT_REQUEST_TIMEOUT_SEC) or DEFAULT_REQUEST_TIMEOUT_SEC)
     if getattr(args, "exchange", "binance") == "bybit":
         from app.data.exchange_clients.bybit_linear import BybitLinearClient
@@ -3450,9 +3474,11 @@ def _scanner_runner_with_context(
     microstructure_flow_service: MicrostructureFlowService | None = None,
     order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
+    exchange_client: Any | None = None,
 ) -> Any:
     try:
         return ScannerRunner(
+            exchange_client=exchange_client,
             market_data_cache=cache,
             btc_d_context_service=btc_d_context_service,
             macro_calendar_service=macro_calendar_service,
@@ -3643,7 +3669,13 @@ async def _run_watch_mode(
     disk_worker = SerializedDiskWorker()
     lifecycle_worker = LifecycleWorker()
     loop_lag = LoopLagMonitor(interval=0.5)
+    args._watch_market_data_cache = (
+        MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
+        if args.cache_enabled else None)
+    # A single watch owner reuses one public HTTP pool across non-overlapping scans.
+    args._watch_exchange_client = None
     try:
+        args._watch_exchange_client = _public_exchange_client(args)
         await loop_lag.start()
         if microstructure_flow_service is not None:
             await microstructure_flow_service.start(startup_queued_symbols)
@@ -3690,11 +3722,15 @@ async def _run_watch_mode(
                 disposition = classify_watch_exception(iteration_error)
                 if disposition == WatchFailureDisposition.RECOVERABLE:
                     failure_streak += 1
-                selected_backoff = (
-                    failure_backoff_seconds(failure_streak)
-                    if disposition == WatchFailureDisposition.RECOVERABLE
-                    else 0.0
-                )
+                if disposition != WatchFailureDisposition.RECOVERABLE:
+                    selected_backoff = 0.0
+                elif discovery_failure_continues_owner_monitoring(iteration_error):
+                    selected_backoff = discovery_retry_backoff_seconds(
+                        failure_streak,
+                        jitter=_discovery_retry_jitter(),
+                    )
+                else:
+                    selected_backoff = failure_backoff_seconds(failure_streak)
                 finished_monotonic = time.monotonic()
                 schedule = schedule_after_iteration(
                     scheduled_start_monotonic=scheduled_start_monotonic,
@@ -3749,6 +3785,7 @@ async def _run_watch_mode(
                 await asyncio.sleep(max(0.0, scheduled_start_monotonic - time.monotonic()))
                 continue
             assert iteration_watchlist is not None and execution is not None
+            watchlist = iteration_watchlist
             completed_at = _watch_iteration_timestamp()
             activations: list[WatchActivation] = []
             updated_state = previous_state
@@ -4143,6 +4180,13 @@ async def _run_watch_mode(
             await loop_lag.stop()
         except Exception as exc:
             isolation_errors.append(exc)
+        try:
+            if args._watch_market_data_cache is not None:
+                await args._watch_market_data_cache.aclose()
+            if args._watch_exchange_client is not None:
+                await args._watch_exchange_client.aclose()
+        except Exception as exc:
+            isolation_errors.append(exc)
         services = (microstructure_flow_service, order_book_liquidity_service, liquidation_flow_service)
         cleanup_results = await asyncio.gather(*(service.stop() for service in services if service is not None), return_exceptions=True)
         cleanup_errors = [item for item in cleanup_results if isinstance(item, BaseException)]
@@ -4425,12 +4469,54 @@ def _record_failed_watch_iteration(
         print(f"Warning: failed iteration manifest persistence failed safely: {type(exc).__name__}: {exc}")
 
 
+def _discovery_retry_jitter() -> float:
+    return random.random()
+
+
+def _verified_discovery_watchlist(watchlist: WatchlistResolution) -> bool:
+    diagnostics = watchlist.universe.diagnostics
+    if diagnostics.get("discovery_status") == "unavailable":
+        return False
+    if diagnostics.get("verified_membership") is False:
+        return False
+    return _DISCOVERY_CONFIG_PLACEHOLDER not in watchlist.symbols
+
+
+def _discovery_unavailable_watchlist(
+    args: argparse.Namespace,
+    exc: BaseException,
+) -> WatchlistResolution:
+    """A non-admission placeholder used only until a fresh universe resolves."""
+
+    universe = SymbolUniverse(
+        mode=str(args.universe),
+        requested_size=int(args.universe_size),
+        resolved_symbols=(),
+        excluded_symbols=(),
+        source="discovery_unavailable",
+        generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        diagnostics={
+            "discovery_status": "unavailable",
+            "verified_membership": False,
+            "new_setup_admission": "blocked",
+            "reason": _watch_phase_error("discovery", exc),
+        },
+    )
+    return WatchlistResolution(
+        symbols=(),
+        source_label="discovery unavailable; monitoring owned plans only",
+        universe=universe,
+    )
+
+
 @profiled("universe")
 async def _watchlist_for_watch_iteration(
     args: argparse.Namespace,
     startup_watchlist: WatchlistResolution,
 ) -> WatchlistResolution:
-    if _watch_mode_refreshes_universe(args):
+    if not _verified_discovery_watchlist(startup_watchlist):
+        watchlist = await _resolve_watchlist_for_args(args)
+    elif _watch_mode_refreshes_universe(args):
         watchlist = await _resolve_watchlist_for_scan(args)
     else:
         watchlist = startup_watchlist
@@ -4460,12 +4546,17 @@ async def _run_watch_scan_iteration(
     liquidation_flow_service: LiquidationFlowService | None = None,
     lifecycle_worker: LifecycleWorker | None = None,
 ) -> WatchScanExecution:
+    if not _verified_discovery_watchlist(watchlist):
+        raise UniverseResolutionError(
+            "universe_error: unverified discovery membership cannot create setups"
+        )
     phase_statuses = {"universe": "SUCCESS"}
     recoverable_errors: list[str] = []
     telegram_outbox_status: dict[str, int] = {}
     telegram_delivery_summary: TelegramLifecycleDeliverySummary | None = None
     cache = (
-        MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
+        getattr(args, "_watch_market_data_cache", None)
+        or MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
         if args.cache_enabled
         else None
     )
@@ -4569,6 +4660,7 @@ async def _run_watch_scan_iteration(
             microstructure_flow_service=microstructure_flow_service,
             order_book_liquidity_service=order_book_liquidity_service,
             liquidation_flow_service=liquidation_flow_service,
+            exchange_client=getattr(args, "_watch_exchange_client", None),
         )
         try:
             scan_result = await _run_scanner(
@@ -5068,6 +5160,7 @@ async def _run_replay(
         execution_timeframe=args.execution_timeframe,
         confirmation_timeframe=args.confirmation_timeframe,
         htf_timeframe=args.htf_timeframe,
+        strategy_version=args.strategy_version,
         bias_timeframe=args.bias_timeframe,
         structure_timeframe=args.structure_timeframe,
         replay_candles=replay_candles,
@@ -5096,17 +5189,21 @@ async def _fetch_replay_symbol_timeframes(
 ) -> tuple[Mapping[str, Sequence[Any]], tuple[str, ...], Mapping[str, Any], tuple[str, ...]]:
     limit_warnings: list[str] = []
     primary_limit = _replay_primary_fetch_limit(args, limit_warnings)
-    primary_candles = await runner._request_public_api(
-        config,
-        f"{symbol} replay {args.execution_timeframe} candles",
-        lambda: client.get_klines(symbol, args.execution_timeframe, primary_limit),
-    )
-    candles_by_timeframe, missing_data, timeframe_context = await runner._fetch_strategy_timeframe_candles(
+    if config.decision_timestamp is None:
+        config = config.model_copy(update={"decision_timestamp": datetime.now(UTC)})
+    primary_delivery = await runner._request_klines_delivery(
+        client, config, symbol, args.execution_timeframe, primary_limit,
+        f"{symbol} replay {args.execution_timeframe} candles")
+    primary_closed = runner._observe_closed_delivery(primary_delivery, symbol=symbol,
+        timeframe=args.execution_timeframe, config=config)
+    candles_by_timeframe, _, missing_data, timeframe_context = await runner._fetch_strategy_timeframe_candles(
         client=client,
         symbol=symbol,
         config=config,
-        primary_candles=primary_candles,
+        primary_candles=primary_closed.candles,
+        primary_delivery=primary_closed.delivery,
     )
+    timeframe_context["exchange"] = config.exchange
     return candles_by_timeframe, missing_data, timeframe_context, _unique_texts(limit_warnings)
 
 
@@ -5846,13 +5943,13 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"{mode}: valid={_bool_text(bool(diagnostics.get('is_valid')))} "
                 f"trust={_display(diagnostics.get('trust_grade'))} "
                 f"{_display(diagnostics.get('trust_percentage'))}%",
-                f"{mode} {htf_timeframe.upper()} context: {_context_source_text(_display(diagnostics.get('htf_2d_context_source')))}",
+                f"{mode} {htf_timeframe.upper()} context: {_context_source_text(_display(htf_value(diagnostics, 'context_source')))}",
                 f"{mode} {bias_timeframe.upper()} bias: {'direct' if candles_12h_count > 0 else NA}",
-                f"{mode} candles: 2D={_display(diagnostics.get('candles_2d_count'))}, "
+                f"{mode} candles: {htf_label(diagnostics)}={_display(htf_value(diagnostics, 'count'))}, "
                 f"12H={_display(diagnostics.get('candles_12h_count'))}, "
                 f"15m={_display(diagnostics.get('candles_15m_count'))}, "
                 f"{confirmation_timeframe} confirmation={_display(diagnostics.get('candles_5m_count') if confirmation_timeframe == '5m' else diagnostics.get('candles_15m_count'))}",
-                f"{mode} HTF/MTF trend: 2D={_display(diagnostics.get('htf_2d_trend'))}, "
+                f"{mode} HTF/MTF trend: {htf_label(diagnostics)}={_display(htf_value(diagnostics))}, "
                 f"12H={_display(diagnostics.get('mtf_12h_trend'))}",
                 f"{mode} {execution_timeframe} execution sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",
                 f"{mode} {confirmation_timeframe} confirmation BOS/CHoCH: "

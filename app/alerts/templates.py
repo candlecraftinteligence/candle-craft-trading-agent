@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
 from app.data.dtos import NA
+from app.core.trade_plan_integrity import validate_public_trade_plan
 
 CANDLE_CRAFT_SIGNATURE = "Candle Craft | Signal. Structure. Execution."
 DEFAULT_RISK_WARNING = (
@@ -25,6 +27,12 @@ def format_trade_alert(trade_idea: Any) -> str:
     message = _signal_message_from_trade_idea(data)
     if _is_rejected_trade_idea(data):
         return format_public_no_trade_message(message, _rejection_reason(data))
+    plan = validate_public_trade_plan(direction=message.direction,entry_low=message.entry_low,
+        entry_high=message.entry_high,stop_loss=message.stop_loss,tp1=message.tp1,tp2=message.tp2,tp3=message.tp3,
+        execution_cost=data.get("execution_cost", Decimal("0")))
+    if not plan.valid:
+        return format_public_no_trade_message(message,f"Final economic plan: {plan.reason}")
+    message=replace(message,planned_rr=plan.rr)
     return format_premium_public_signal_message(message)
 
 

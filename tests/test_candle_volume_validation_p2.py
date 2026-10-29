@@ -1098,11 +1098,9 @@ def test_multi_symbol_scanner_isolates_malformed_symbol_from_valid_symbol() -> N
 
 
 def _run_immediate(coro: Any) -> Any:
-    try:
-        coro.send(None)
-    except StopIteration as done:
-        return done.value
-    raise RuntimeError("probe unexpectedly requested asynchronous I/O")
+    # Shared acquisitions now run as shielded asyncio tasks. Preserve every
+    # integrity assertion under the cache's actual event-loop contract.
+    return asyncio.run(coro)
 
 
 def test_r1_cutoff_parity_across_direct_cache_and_provider_paths() -> None:

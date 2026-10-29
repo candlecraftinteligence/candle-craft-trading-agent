@@ -28,7 +28,7 @@ def _base_idea(**overrides: object) -> dict[str, object]:
         "entry_low": Decimal("100"),
         "entry_high": Decimal("102"),
         "stop_loss": Decimal("95"),
-        "take_profit_targets": (Decimal("112"), Decimal("120")),
+        "take_profit_targets": (Decimal("112"), Decimal("126.5"), Decimal("130")),
         "invalidation": "Price closes below the reclaimed range low.",
         "opportunity_score": Decimal("88"),
         "opportunity_grade": "A",
@@ -55,13 +55,13 @@ def test_formats_valid_trade_idea() -> None:
 
     assert message.startswith("🐺 BTCUSDT · LONG · SETUP")
     assert "BTCUSDT · LONG · SETUP" in message
-    assert "A · Score N/A · 3.50R" in message
+    assert "A · Score N/A · TP2 RR 3.50R" in message
     assert "🟢 SIGNAL CONFIRMED" in message
     assert "🎯 ENTRY 100 – 102" in message
     assert "🛡 SL 95" in message
     assert "TP1 112" in message
-    assert "TP2 120" in message
-    assert "TP3 N/A" in message
+    assert "TP2 126.5" in message
+    assert "TP3 130" in message
     assert message.count(PUBLIC_TRADE_MAP_RISK_WARNING) == 1
     assert message.index(PUBLIC_TRADE_MAP_RISK_WARNING) < message.index("CCI · Signal. Structure. Execution.")
     assert "Risk warning: N/A" not in message
@@ -70,6 +70,18 @@ def test_formats_valid_trade_idea() -> None:
     assert "Trade Map (incomplete stored context)" not in message
     assert "Manual execution only. Manage risk." not in message
     assert "Exchange:" not in message
+
+
+def test_alert_uses_net_tp2_economics_and_cannot_publish_a_claimed_best_rr():
+    overstated = _idea(best_rr=Decimal("99"))
+    message = AlertAgent().format(overstated)
+    assert "TP2 RR 3.50R" in message and "99.00R" not in message
+    below_floor = _idea(best_rr=Decimal("99"), execution_cost=Decimal("1"))
+    assert below_floor.execution_cost == Decimal("1")
+    blocked = AlertAgent().format(below_floor)
+    assert "NO TRADE" in blocked and "SIGNAL CONFIRMED" not in blocked
+    missing_target = AlertAgent().format(_idea(take_profit_targets=(Decimal("112"),Decimal("126.5"))))
+    assert "NO TRADE" in missing_target and "SIGNAL CONFIRMED" not in missing_target
 
 def test_dry_run_does_not_call_telegram() -> None:
     async def scenario() -> None:
@@ -232,7 +244,8 @@ def test_unverified_data_preserved_as_unverified() -> None:
     message = AlertAgent().format(_idea(unverified_data=("funding: Unverified", "open_interest: Unverified")))
 
     assert "Unverified data:" not in message
-    assert "Unverified" not in message
+    assert "Derivatives: N/A" in message
+    assert "exchange fill are Unverified" in message
 
 
 def test_public_signal_states_risk_warning_and_preserves_internal_risk_warning() -> None:

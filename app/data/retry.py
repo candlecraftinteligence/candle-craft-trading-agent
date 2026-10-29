@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
@@ -57,6 +58,7 @@ async def retry_async(
 
             retry_after = getattr(exc, "retry_after", None)
             exponential_delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            exponential_delay = min(max_delay, exponential_delay + random.random()*max(0, base_delay)*0.25)
             delay = max(exponential_delay, retry_after or 0)
             if on_retry_event is not None:
                 on_retry_event(

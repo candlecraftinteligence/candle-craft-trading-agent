@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.strategies.context_fields import htf_value, htf_label
 from app.data.dtos import NA, MaybeDecimal
 
 OUTPUT_QUANT = Decimal("0.00000001")
@@ -269,7 +270,7 @@ def condition_key_from_diagnostics(
     return EdgeConditionKey(
         symbol=symbol,
         mode=mode,
-        htf_direction_alignment=_direction_alignment(bias, diagnostics.get("htf_2d_trend")),
+        htf_direction_alignment=_direction_alignment(bias, htf_value(diagnostics)),
         derivatives_state=_derivatives_state(diagnostics),
         volume_profile_alignment=_volume_profile_alignment(bias, diagnostics),
         rr_bucket=_rr_bucket(diagnostics.get("rr_to_tp2")),
@@ -423,7 +424,7 @@ def _trend_alignment(bias: Any, diagnostics: Mapping[str, Any]) -> str:
     values = tuple(
         value
         for value in (
-            _direction_alignment(bias, diagnostics.get("htf_2d_trend")),
+            _direction_alignment(bias, htf_value(diagnostics)),
             _direction_alignment(bias, diagnostics.get("mtf_12h_trend")),
             _direction_alignment(bias, diagnostics.get("trend")),
         )

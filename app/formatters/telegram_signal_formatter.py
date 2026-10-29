@@ -6,7 +6,6 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-from app.core.price_precision import quantize_public_price
 from app.data.dtos import NA
 
 HEADER_PREFIX = "\U0001F43A\U0001F7E0"
@@ -45,6 +44,8 @@ class SignalEdgeEvidence:
     """Validated strategy facts that may be projected into the public Edge block."""
 
     sweep_present: bool = False
+    strategy_version: Any = NA
+    selected_fib_ratio: Any = NA
     sweep_direction: Any = NA
     swept_level: Any = NA
     sweep_wick: Any = NA
@@ -67,9 +68,9 @@ PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.WATCHLIST: "ON THE RADAR",
     TelegramAlertType.SETUP_TRIGGERED: "HUNT ACTIVE — CONFIRMATION PENDING",
     TelegramAlertType.SIGNAL_CONFIRMED: "SIGNAL CONFIRMED",
-    TelegramAlertType.LIMIT_HIT: "ZONE ENGAGED",
-    TelegramAlertType.TP1_HIT: "TP1 SECURED",
-    TelegramAlertType.TP2_HIT: "TP2 SECURED",
+    TelegramAlertType.LIMIT_HIT: "ENTRY ZONE TOUCHED",
+    TelegramAlertType.TP1_HIT: "TP1 REACHED",
+    TelegramAlertType.TP2_HIT: "TP2 REACHED",
     TelegramAlertType.TP3_HIT: "FULL TARGET SEQUENCE COMPLETE",
     TelegramAlertType.SL_HIT: "SETUP INVALIDATED",
     TelegramAlertType.BREAKEVEN: "BREAKEVEN",
@@ -262,21 +263,22 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
         *_premium_trade_map_lines(message),
         "",
         PREMIUM_SIGNAL_SEPARATOR,
+        "",
+        f"Market bias: {_display(message.htf_bias)}",
+        f"Derivatives: {_display(message.derivatives_status)}",
         *edge_section,
         "",
         "\u2694\ufe0f EXECUTION",
         "",
+        "If you choose to enter, use only the mapped zone and size from stop-loss risk.",
         (
-            "Zone active. Watch the reaction. No chase."
+            "Zone touched. Use the confirmed plan only while structure remains valid. No chase."
             if message.zone_active
-            else "Wait for the mapped zone. No chase."
+            else "Wait for the mapped zone; reassess if structure changes. No chase."
         ),
         "",
-        (
-            "\U0001F43A The hunt is live."
-            if message.zone_active
-            else "\U0001F43A Hunt live."
-        ),
+        _public_compact_invalidation_line(message),
+        "Price contact is observed; your entry and exchange fill are Unverified.",
         *_public_trade_map_risk_warning_lines(),
         "",
         CCI_FOOTER,
@@ -396,7 +398,7 @@ def _public_grade_score_rr_line(message: TelegramSignalMessage) -> str:
     grade = _quality_display(_first_display(context.grade, message.quality))
     score = _display(_first_display(context.quality_score, message.quality_score))
     rr = format_rr(_first_display(context.rr, message.planned_rr))
-    return f"{grade} {MIDDLE_DOT} Score {score} {MIDDLE_DOT} RR {rr}"
+    return f"{grade} {MIDDLE_DOT} Score {score} {MIDDLE_DOT} TP2 RR {rr}"
 
 
 def _premium_grade_score_rr_line(message: TelegramSignalMessage) -> str:
@@ -404,7 +406,7 @@ def _premium_grade_score_rr_line(message: TelegramSignalMessage) -> str:
     grade = _quality_display(_first_display(context.grade, message.quality))
     score = _display(_first_display(context.quality_score, message.quality_score))
     rr = format_rr(_first_display(context.rr, message.planned_rr))
-    return f"{grade} {MIDDLE_DOT} Score {score} {MIDDLE_DOT} {rr}"
+    return f"{grade} {MIDDLE_DOT} Score {score} {MIDDLE_DOT} TP2 RR {rr}"
 
 
 def _premium_has_canonical_target_caution(message: TelegramSignalMessage) -> bool:
@@ -452,7 +454,9 @@ def _public_edge_strip(message: TelegramSignalMessage) -> str:
 
     zone = _edge_zone_label(evidence.selected_zone_type)
     fib = bool(evidence.fib_aligned)
-    if zone == "order block" and fib:
+    ratio = _decimal_value(evidence.selected_fib_ratio)
+    selective = evidence.strategy_version == "selective-fib-mtf-v2" and ratio in (Decimal("0.618"), Decimal("0.750"), Decimal("0.786"))
+    if zone == "order block" and fib and not selective:
         tokens.append("OB/Fib \u2713")
     else:
         if zone in {"order block", "OB/FVG overlap"}:
@@ -460,7 +464,7 @@ def _public_edge_strip(message: TelegramSignalMessage) -> str:
         if zone in {"FVG", "OB/FVG overlap"}:
             tokens.append("FVG \u2713")
         if fib:
-            tokens.append("Fib \u2713")
+            tokens.append(f"Fib {ratio:.3f} \u2713" if selective else "Fib \u2713")
     return f" {MIDDLE_DOT} ".join(dict.fromkeys(tokens)) if tokens else NA
 
 
@@ -682,6 +686,10 @@ def _public_edge_entry_line(evidence: SignalEdgeEvidence | None) -> str:
         line = f"{subject} overlaps the selected {zone}"
     else:
         line = f"{subject} is aligned with the validated fib pullback zone"
+    if evidence.strategy_version == "selective-fib-mtf-v2":
+        ratio = _decimal_value(evidence.selected_fib_ratio)
+        if ratio in (Decimal("0.618"), Decimal("0.750"), Decimal("0.786")):
+            return f"{line} at the selected {ratio:.3f} Fibonacci target."
     depth = _edge_pullback_depth(evidence.pullback_depth_ratio)
     if depth != NA:
         line += f" at a {depth} retracement"
@@ -743,7 +751,7 @@ def _public_compact_invalidation_line(message: TelegramSignalMessage) -> str:
     direction = _direction_key(_first_display(context.direction, message.direction))
     if stop != NA:
         side = "below" if direction == "long" else "above" if direction == "short" else "beyond"
-        return f"Invalid if price body-closes and accepts {side} {stop}."
+        return f"Invalidation: hard stop on price contact at or {side} {stop}."
     explicit = _public_invalidation_text(message)
     if explicit != NA and "stop level unavailable" not in explicit.lower():
         return explicit
@@ -862,11 +870,13 @@ def format_premium_lifecycle_update_message(
 
 def format_limit_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"\U0001F3AF {format_symbol(message.symbol)} {MIDDLE_DOT} ZONE ENGAGED",
+        f"\U0001F3AF {format_symbol(message.symbol)} {MIDDLE_DOT} ENTRY ZONE TOUCHED",
         "",
         f"Entry {format_entry_zone(message)}",
         "",
         "Price has reached the mapped territory.",
+        "Observed price contact only. Exchange fill and user execution: Unverified.",
+        "A wick touch does not provide structural entry confirmation.",
         "",
         "\u2694\ufe0f REACTION REQUIRED",
         "",
@@ -880,11 +890,13 @@ def format_limit_hit_update(message: TelegramSignalMessage) -> str:
 
 def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"\u2705 {format_symbol(message.symbol)} {MIDDLE_DOT} TP1 SECURED",
+        f"\u2705 {format_symbol(message.symbol)} {MIDDLE_DOT} TP1 REACHED",
         "",
         format_price(message.tp1),
         "",
         "First objective reached.",
+        "Simulated tracking; actual fills and realized profit are Unverified.",
+        "For a position you actually entered:",
         "Move SL to breakeven.",
         _breakeven_reference_line(message),
         "",
@@ -897,11 +909,13 @@ def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
 def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
     consolidated = _coalesced_target_count(message) >= 2
     return _join(
-        f"\U0001F525 {format_symbol(message.symbol)} {MIDDLE_DOT} TP2 SECURED",
+        f"\U0001F525 {format_symbol(message.symbol)} {MIDDLE_DOT} TP2 REACHED",
         "",
         "TP1 \u2713 \u00b7 TP2 \u2713" if consolidated else format_price(message.tp2),
         "",
         "Second objective reached.",
+        "Simulated tracking; actual fills and realized profit are Unverified.",
+        "For a position you actually entered:",
         "Move / keep SL at breakeven.",
         _breakeven_reference_line(message),
         "",
@@ -923,6 +937,7 @@ def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
         ),
         "",
         "Full target sequence completed.",
+        "Simulated tracking; actual fills and realized profit are Unverified.",
         "",
         "\U0001F43A Hunt complete.",
     )
@@ -962,6 +977,7 @@ def format_sl_hit_update(message: TelegramSignalMessage) -> str:
         "Structural thesis failed.",
         "",
         "Result: SL",
+        "Simulated tracking; actual execution and loss are Unverified.",
         "",
         "\U0001F9E0 Outcome logged for expectancy tracking.",
         "",
@@ -1190,10 +1206,10 @@ def safe_invalidation_text(message: TelegramSignalMessage) -> str:
     if stop == NA:
         return NA
     if direction == "long":
-        return f"Invalid if price body-closes and accepts below {stop}."
+        return f"Invalidation: hard stop on price contact at or below {stop}."
     if direction == "short":
-        return f"Invalid if price body-closes and accepts above {stop}."
-    return f"Invalid if price body-closes and accepts beyond {stop}."
+        return f"Invalidation: hard stop on price contact at or above {stop}."
+    return f"Invalidation: hard stop on price contact at or beyond {stop}."
 
 
 def safe_public_rejection_summary(value: Any) -> str:
@@ -1449,8 +1465,7 @@ def _price_display(value: Any) -> str:
     number = _decimal_value(value)
     if number is None:
         return NA
-    rounded = quantize_public_price(number)
-    output = format(rounded, "f")
+    output = format(number, "f")
     return output.rstrip("0").rstrip(".") if "." in output else output
 
 

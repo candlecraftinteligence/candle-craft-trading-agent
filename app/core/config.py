@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     local_manual_mode: bool = True
     order_execution_enabled: bool = False
     cmc_mode: Literal["off", "collect", "shadow", "decision"] = "off"
+    # Switch only after the CMC ranking and reviewed identity manifest are verified.
+    market_cap_provider: Literal["coinpaprika", "cmc"] = "coinpaprika"
     cmc_api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
     cmc_keyless: bool = False
     cmc_sidecar_path: Path = Path("research_runs/cmc_intelligence.sqlite")

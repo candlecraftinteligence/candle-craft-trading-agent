@@ -202,8 +202,8 @@ def _record(
         entry_high="102",
         stop_loss="95",
         tp1="110",
-        tp2="115",
-        tp3="120",
+        tp2="123",
+        tp3="130",
 
         setup_identity=f"BTCUSDT|swing|long|{signal_id}",
     )
@@ -259,8 +259,8 @@ def _diagnostics(**overrides: object) -> dict[str, object]:
         "entry_high": Decimal("102"),
         "stop": Decimal("95"),
         "tp1": Decimal("110"),
-        "tp2": Decimal("115"),
-        "tp3": Decimal("120"),
+        "tp2": Decimal("123"),
+        "tp3": Decimal("130"),
         "rr_to_tp2": Decimal("3"),
         "invalidation": "Invalid if price accepts below 95.",
         "structure_reason": "Sweep and reclaim into valid pullback.",
@@ -309,7 +309,7 @@ def _trade_idea(**overrides: object):
         "entry_low": Decimal("100"),
         "entry_high": Decimal("102"),
         "stop_loss": Decimal("95"),
-        "take_profit_targets": (Decimal("110"), Decimal("115"), Decimal("120")),
+        "take_profit_targets": (Decimal("110"), Decimal("123"), Decimal("130")),
         "invalidation": "Invalid if price accepts below 95.",
         "opportunity_score": Decimal("88"),
         "opportunity_grade": "A",
@@ -1813,8 +1813,8 @@ def test_confirmed_public_quality_and_opportunity_are_conjunctive(
         previous=SetupLifecycleState.TRIGGERED,
         setup_quality=_setup_quality_with_grade(grade, quality_score=quality_score),
         opportunity_score=opportunity_score,
-        diagnostics=_diagnostics(rr_to_tp2=Decimal("4")),
-        trade_idea=_trade_idea(best_rr=Decimal("4")),
+        diagnostics=_diagnostics(rr_to_tp2=Decimal("3")),
+        trade_idea=_trade_idea(best_rr=Decimal("3")),
     )
 
     decision = telegram_alert_decision_for_symbol(
@@ -2024,7 +2024,7 @@ def test_public_signal_context_extracts_specific_diagnostics_for_message() -> No
     assert "Entry 100 – 102 overlaps the selected FVG and the validated fib pullback zone." in text
     assert "The stored plan provides 3.25R to TP2." in text
     assert "clean RR path" not in text
-    assert "Invalid if price" in text and "below 95" in text
+    assert "Invalidation: hard stop on price contact at or below 95." in text
     assert "Setup quality does not provide enough deterministic edge" not in text
 
 

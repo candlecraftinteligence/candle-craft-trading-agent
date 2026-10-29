@@ -73,13 +73,13 @@ def test_valid_setup_formatting_is_premium_telegram_ready() -> None:
     text = format_telegram_strategy_output(_valid_symbol_result())
 
     assert text.startswith("🐺 BTCUSDT · LONG · SCALP")
-    assert "A · Score N/A · 3.25R" in text
+    assert "A · Score N/A · TP2 RR 3.25R" in text
     assert "🟢 SIGNAL CONFIRMED" in text
     assert "🎯 ENTRY 103100 – 103300" in text
     assert "TP1 104800" in text
     assert "TP2 106000" in text
     assert "TP3 107500" in text
-    assert "Wait for the mapped zone. No chase." in text
+    assert "Wait for the mapped zone; reassess if structure changes. No chase." in text
     assert "🛡 SL 102400" in text
     assert "Signal ID" not in text
     assert "strategy_diagnostics" not in text

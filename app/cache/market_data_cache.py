@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
+import copy
 import importlib
 import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar
@@ -66,6 +68,13 @@ DEFAULT_TTLS_SECONDS: dict[str, int] = {
     "instrument": 300,
 }
 
+CANDLE_PERIOD_SECONDS = {"15m": 900, "4h": 14400, "12h": 43200, "1d": 86400}
+
+
+def closed_higher_timeframe_ttl_seconds(interval: str, now: float) -> float | None:
+    period = CANDLE_PERIOD_SECONDS.get(interval.strip().lower())
+    return period - (now % period) if period else None
+
 
 class MarketDataCache:
     """Cache successful public market-data responses for one scanner run.
@@ -82,11 +91,17 @@ class MarketDataCache:
         ttl_seconds: int | None = None,
         file_path: Path | str | None = None,
         now: Callable[[], float] | None = None,
+        max_entries: int = 2048,
+        max_file_bytes: int = 64*1024*1024,
     ) -> None:
         self.enabled = enabled
         self.ttl_seconds = ttl_seconds
         self.file_path = Path(file_path) if file_path is not None else None
         self._now = now or time.time
+        if max_entries < 1 or max_file_bytes < 1024:
+            raise ValueError("invalid market-cache budget")
+        self.max_entries, self.max_file_bytes = max_entries, max_file_bytes
+        self._inflight: dict[str, asyncio.Task] = {}
         self._entries: dict[str, dict[str, Any]] = {}
         self._capture_by_entry_id: dict[int, Any] = {}
         self._file_loaded_entry_ids: set[int] = set()
@@ -121,11 +136,13 @@ class MarketDataCache:
         data_type: str,
         key_parts: Mapping[str, Any],
         fetch: Callable[[], Awaitable[T]],
+        ttl_seconds: float | Callable[[Any, float], float] | None = None,
     ) -> T:
         recorded = await self.get_or_fetch_with_local_delivery(
             data_type=data_type,
             key_parts=key_parts,
             fetch=fetch,
+            ttl_seconds=ttl_seconds,
         )
         return recorded.value
 
@@ -136,7 +153,41 @@ class MarketDataCache:
         key_parts: Mapping[str, Any],
         fetch: Callable[[], Awaitable[T]],
         bind_upstream: Callable[[], Any] | None = None,
+        ttl_seconds: float | Callable[[Any, float], float] | None = None,
     ) -> LocalCacheFetchResult:
+        kwargs = dict(data_type=data_type, key_parts=key_parts, fetch=fetch,
+                      bind_upstream=bind_upstream, ttl_seconds=ttl_seconds)
+        if not self.enabled:
+            return await self._fetch_with_local_delivery(**kwargs)
+        key = self.cache_key(data_type=data_type, key_parts=key_parts)
+        existing = self._entries.get(key)
+        if existing is not None and float(existing.get("expires_at", 0)) > self._now():
+            return await self._fetch_with_local_delivery(**kwargs)
+        pending = self._inflight.get(key)
+        if pending is not None:
+            result = await asyncio.shield(pending)
+            self.hits += 1
+            return replace(result, value=copy.deepcopy(result.value), delivery_kind=CACHE_KIND_HIT)
+        if len(self._inflight) >= 128:
+            raise RuntimeError("market-data inflight budget exhausted")
+        task = asyncio.create_task(self._fetch_with_local_delivery(**kwargs))
+        self._inflight[key] = task
+        def done(completed):
+            if self._inflight.get(key) is completed:
+                self._inflight.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()  # drain failures after a cancelled waiter
+        task.add_done_callback(done)
+        return await asyncio.shield(task)
+
+    async def aclose(self) -> None:
+        tasks = tuple(self._inflight.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _fetch_with_local_delivery(self, *, data_type, key_parts, fetch,
+                                         bind_upstream=None, ttl_seconds=None) -> LocalCacheFetchResult:
         if not self.enabled:
             value = await fetch()
             upstream = bind_upstream() if bind_upstream is not None else None
@@ -178,15 +229,20 @@ class MarketDataCache:
         value = await fetch()
         previous = self._entries.get(cache_key)
         self._forget_entry_capture(previous)
+        fetched_at = self._now()
         new_entry = {
             "version": CACHE_FILE_VERSION,
             "data_type": data_type,
             "key": _json_safe_key(dict(key_parts)),
             "created_at": now,
-            "expires_at": now + self._ttl_for(data_type),
+            "expires_at": fetched_at + (ttl_seconds(value, fetched_at) if callable(ttl_seconds)
+                                          else ttl_seconds if ttl_seconds is not None else self._ttl_for(data_type)),
             "value": _serialize_value(value),
         }
         self._entries[cache_key] = new_entry
+        while len(self._entries) > self.max_entries:
+            oldest_key = next(iter(self._entries))
+            self._forget_entry_capture(self._entries.pop(oldest_key))
         upstream = bind_upstream() if bind_upstream is not None else None
         if upstream is not None:
             self._capture_by_entry_id[id(new_entry)] = upstream
@@ -229,6 +285,9 @@ class MarketDataCache:
         if self.file_path is None or not self.file_path.exists():
             return
         try:
+            if self.file_path.stat().st_size > self.max_file_bytes:
+                self.errors += 1
+                return
             payload = json.loads(self.file_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             self.errors += 1
@@ -246,7 +305,7 @@ class MarketDataCache:
                 self.errors += 1
                 continue
             loaded_entries[str(key)] = dict(value)
-        self._entries = loaded_entries
+        self._entries = dict(list(loaded_entries.items())[-self.max_entries:])
         self._capture_by_entry_id = {}
         self._file_loaded_entry_ids = {id(entry) for entry in self._entries.values()}
 
@@ -254,19 +313,14 @@ class MarketDataCache:
         if self.file_path is None:
             return
         try:
+            body = json.dumps({"version": CACHE_FILE_VERSION, "entries": self._entries},
+                              indent=2, ensure_ascii=False)
+            if len(body.encode("utf-8")) > self.max_file_bytes:
+                self.errors += 1
+                return
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path = self.file_path.with_suffix(f"{self.file_path.suffix}.tmp")
-            temp_path.write_text(
-                json.dumps(
-                    {
-                        "version": CACHE_FILE_VERSION,
-                        "entries": self._entries,
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+            temp_path.write_text(body, encoding="utf-8")
             temp_path.replace(self.file_path)
         except OSError:
             self.errors += 1
@@ -282,6 +336,25 @@ class CachedMarketDataClient(BaseExchangeClient):
         self.cache = cache
         self.exchange_name = _exchange_name(client)
 
+    def _closed_candle_ttl(self, interval: str):
+        def ttl(value, now):
+            from app.data.candle_integrity import normalize_utc_timestamp
+            remaining = closed_higher_timeframe_ttl_seconds(interval, now)
+            if remaining is None:
+                return self.cache._ttl_for("candles")
+            period = CANDLE_PERIOD_SECONDS[interval.lower()]
+            expected_open = (now // period)*period-period
+            try:
+                present = any(normalize_utc_timestamp(
+                    candle.get("timestamp") if isinstance(candle, Mapping) else candle.timestamp
+                ).timestamp() == expected_open for candle in value)
+            except (TypeError, ValueError, AttributeError):
+                present = False
+            # Never pin a delayed/missing latest close until tomorrow's boundary.
+            cap = self.cache.ttl_seconds if self.cache.ttl_seconds is not None else remaining
+            return max(0, min(remaining, cap)) if present else min(1, self.cache._ttl_for("candles"))
+        return ttl
+
     async def get_klines(self, symbol: str, interval: str, limit: int) -> Any:
         normalized_symbol = symbol.upper()
         normalized_interval = interval.strip()
@@ -296,6 +369,7 @@ class CachedMarketDataClient(BaseExchangeClient):
                 "params": {},
             },
             fetch=lambda: self.client.get_klines(normalized_symbol, interval, limit),
+            ttl_seconds=self._closed_candle_ttl(normalized_interval),
         )
 
     async def get_klines_with_delivery(
@@ -337,6 +411,7 @@ class CachedMarketDataClient(BaseExchangeClient):
             },
             fetch=fetch,
             bind_upstream=lambda: upstream_box[-1] if upstream_box else None,
+            ttl_seconds=self._closed_candle_ttl(normalized_interval),
         )
         candles = recorded.value
         if not isinstance(candles, Sequence) or isinstance(candles, (str, bytes)):
@@ -664,6 +739,23 @@ class CachedMarketDataClient(BaseExchangeClient):
             ),
         )
 
+    async def get_price_precision(self, symbol: str) -> Any:
+        # Keep the acquisition timestamp on the immutable object. Do not turn
+        # a disk cache record without provenance into verified precision.
+        from app.data.instrument_precision import InstrumentPrecision
+        method = getattr(self.client, "get_price_precision", None)
+        if not callable(method):
+            return None
+        cache = getattr(self, "_price_precision_cache", {})
+        value = cache.get(symbol)
+        if isinstance(value, InstrumentPrecision) and value.verified_for(self.exchange_name, symbol, datetime.now(UTC)):
+            return value
+        value = await method(symbol)
+        if isinstance(value, InstrumentPrecision):
+            cache[symbol] = value
+            self._price_precision_cache = cache
+        return value
+
     async def get_instrument_metadata(self, symbol: str, *, capture_clock: Callable[[], datetime] | None = None) -> Any:
         from app.data.derivatives_instrument import InstrumentMetadata, unverified_instrument
 
@@ -758,6 +850,7 @@ class CachedMarketDataClient(BaseExchangeClient):
         return represent_delivery(recorded.value, evidence)
 
     async def aclose(self) -> None:
+        await self.cache.aclose()
         close = getattr(self.client, "aclose", None)
         if callable(close):
             await close()

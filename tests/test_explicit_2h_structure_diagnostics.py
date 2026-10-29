@@ -196,6 +196,8 @@ def test_opposing_neutral_and_missing_structure_results_do_not_change_qualificat
 
 def test_fetch_planner_deduplicates_2h_and_shared_m15_roles() -> None:
     base = ScannerRunConfig(
+        strategy_version="liquidity-grab-v1",
+        htf_timeframe="2d",
         symbols=["BTCUSDT"],
         exchange="binance",
         account_equity=Decimal("10000"),

@@ -68,9 +68,9 @@ def _ready(**overrides: object) -> LifecycleObservation:
         "entry_high": "102",
         "stop_loss": "95",
         "tp1": "110",
-        "tp2": "117",
-        "tp3": "124",
-        "rr": "3.2",
+        "tp2": "123",
+        "tp3": "130",
+        "rr": "3",
         "failed_gate": NA,
         "invalidation_reason": "Invalid if price accepts below 95.",
         "sweep_detected": True,
@@ -302,8 +302,8 @@ def test_plan_ids_and_economics_stay_locked_through_repaired_sequence_and_restar
             entry_high="102",
             stop_loss="95",
             tp1="110",
-            tp2="117",
-            tp3="124",
+            tp2="123",
+            tp3="130",
             invalidation="Invalid if price accepts below 95.",
         ).identity
         assert changed.record.plan_version_id == expected_plan

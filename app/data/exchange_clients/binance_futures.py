@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import asyncio
+import copy
+import time
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -68,6 +71,8 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
             retry_base_delay=retry_base_delay,
             retry_max_delay=retry_max_delay,
         )
+        self._exchange_info_lock = asyncio.Lock()
+        self._exchange_info_snapshot = None
 
     async def get_klines(self, symbol: str, interval: str, limit: int) -> list[CandleDTO]:
         delivery = await self._get_klines_delivery(symbol, interval, limit)
@@ -147,10 +152,21 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         return payload
 
     async def get_exchange_info(self) -> Mapping[str, Any]:
-        payload = await self._get_json("/fapi/v1/exchangeInfo")
-        if not isinstance(payload, Mapping):
-            raise ExchangeResponseError("Expected object response at binance.exchange_info")
-        return payload
+        payload, _ = await self._exchange_info()
+        return copy.deepcopy(payload)
+
+    async def _exchange_info(self, capture_clock=None):
+        async with self._exchange_info_lock:
+            if self._exchange_info_snapshot is not None:
+                expires, payload, acquired = self._exchange_info_snapshot
+                if time.monotonic() < expires:
+                    return payload, acquired
+            payload = await self._get_json(ENDPOINT_BINANCE_EXCHANGE_INFO)
+            if not isinstance(payload, Mapping):
+                raise ExchangeResponseError("Expected object response at binance.exchange_info")
+            acquired = capture_acquisition(capture_clock or default_capture_clock)
+            self._exchange_info_snapshot = (time.monotonic()+300, payload, acquired)
+            return payload, acquired
 
     async def get_funding_rate(self, symbol: str) -> FundingDTO:
         return (await self.get_funding_rate_with_evidence(symbol)).value
@@ -307,6 +323,13 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         )
         return represent_delivery(value, evidence)
 
+    async def get_price_precision(self, symbol: str):
+        from app.data.instrument_precision import parse_precision
+        payload, acquired = await self._exchange_info()
+        if acquired.acquired_at is None:
+            raise ValueError("precision_acquisition_unverified")
+        return parse_precision(payload, exchange="binance", symbol=symbol.upper(), received_at=acquired.acquired_at)
+
     async def get_instrument_metadata(
         self,
         symbol: str,
@@ -314,11 +337,11 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         capture_clock: Callable[[], datetime] | None = None,
     ) -> InstrumentMetadata:
         normalized_symbol = symbol.upper()
-        payload = await self._get_json(ENDPOINT_BINANCE_EXCHANGE_INFO, params={"symbol": normalized_symbol})
+        payload, acquired = await self._exchange_info(capture_clock)
         return parse_binance_usds_instrument(
             payload,
             requested_symbol=normalized_symbol,
-            acquisition=capture_acquisition(capture_clock),
+            acquisition=acquired,
         )
 
 

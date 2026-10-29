@@ -86,9 +86,10 @@ def _public_setup_symbol(
 ):
     short = direction == "short"
     risk = stop_loss - entry_high if short else entry_low - stop_loss
+    worst_risk = stop_loss - entry_low if short else entry_high - stop_loss
     tp1 = entry_low - risk if short else entry_high + risk
-    tp2 = entry_low - (risk * Decimal("2")) if short else entry_high + (risk * Decimal("2"))
-    tp3 = entry_low - (risk * Decimal("3")) if short else entry_high + (risk * Decimal("3"))
+    tp2 = entry_low - (worst_risk * Decimal("3")) if short else entry_high + (worst_risk * Decimal("3"))
+    tp3 = entry_low - (worst_risk * Decimal("4")) if short else entry_high + (worst_risk * Decimal("4"))
     invalidation = (
         f"Invalid if price accepts above {stop_loss}."
         if short
@@ -140,6 +141,9 @@ def _public_setup_symbol(
     )
     return symbol.model_copy(
         update={
+            "trade_idea": _trade_idea(direction=direction, entry_low=entry_low, entry_high=entry_high,
+                stop_loss=stop_loss, take_profit_targets=(tp1, tp2, tp3), best_rr=Decimal("3"),
+                invalidation=invalidation),
             "valid_strategy_modes": source_modes,
             "strategy_diagnostics": {
                 source_mode: {**diagnostics, "mode": source_mode}
@@ -230,6 +234,7 @@ def _generated_entry_batch(
             repository,
             lifecycle_id=lifecycle_id,
             mode="swing",
+            plan_overrides={"tp2": "138", "tp3": "150", "rr": "3"},
         )
         candles.append(_outcome_entry(1, "long"))
         outcome = _evaluate_outcomes(repository, record, candles)
@@ -238,6 +243,10 @@ def _generated_entry_batch(
         SetupLifecycleState.MANAGING,
         previous=SetupLifecycleState.EXECUTING,
         signal_id=lifecycle_id,
+        diagnostics=_diagnostics(stop=Decimal("90"), tp1=Decimal("110"), tp2=Decimal("138"), tp3=Decimal("150"),
+            execution_sweep_status="passed", confirmation_structure_shift_status="passed"),
+        trade_idea=_trade_idea(stop_loss=Decimal("90"),
+            take_profit_targets=(Decimal("110"), Decimal("138"), Decimal("150"))),
     )
     return symbol.model_copy(
         update={
@@ -474,6 +483,23 @@ def test_mode_projection_change_does_not_resend_equivalent_trigger(
     assert repeated.sent == 0
     assert repeated.deliveries[0].status == "duplicate"
     assert repeated.deliveries[0].error_message == "duplicate_equivalent_public_setup"
+    assert len(sender.messages) == 1
+
+
+def test_strategy_version_metadata_cannot_duplicate_an_owned_public_signal(tmp_path) -> None:
+    db_path = tmp_path / "strategy-version-dedupe.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    first = _public_setup_symbol(signal_id="original-generation")
+    second = _public_setup_symbol(signal_id="selective-generation")
+    diagnostics = dict(second.strategy_diagnostics["swing"])
+    diagnostics.update(strategy_version="selective-fib-mtf-v2", htf_timeframe="1d",
+                       htf_1d_trend="bullish", selective_fib={"selected_ratio": "0.618"})
+    second = second.model_copy(update={"strategy_diagnostics": {"swing": diagnostics}})
+    initial = run(service.deliver_for_run(_run_result(first), scan_run_id="original"))
+    repeated = run(service.deliver_for_run(_run_result(second), scan_run_id="selective"))
+    assert initial.sent == 1 and repeated.sent == 0
+    assert repeated.deliveries[0].status == "duplicate"
     assert len(sender.messages) == 1
 
 
@@ -1268,7 +1294,7 @@ def test_coalesced_triggered_never_becomes_a_recovery_send(tmp_path) -> None:
     assert recovered.deliveries[0].alert_type == TelegramAlertType.LIMIT_HIT.value
     assert repeated.sent == 0
     assert len(sender.messages) == 2
-    assert "ZONE ENGAGED" in sender.messages[-1]
+    assert "ENTRY ZONE TOUCHED" in sender.messages[-1]
     assert all("SETUP TRIGGERED" not in message for message in sender.messages)
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         final_states = repository._connection.execute(

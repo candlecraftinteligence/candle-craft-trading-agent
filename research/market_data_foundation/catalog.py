@@ -34,9 +34,9 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 105, "contains": '"/fapi/v1/klines"'},
+            {"path": "app/data/exchange_clients/binance_futures.py", "line": 110, "contains": '"/fapi/v1/klines"'},
             {"path": "app/data/normalizers/binance.py", "line": 41, "contains": "volume=decimal_from(require_index(raw, 5, row_path)"},
-            {"path": "app/cache/market_data_cache.py", "line": 59, "contains": '"candles": 60'},
+            {"path": "app/cache/market_data_cache.py", "line": 61, "contains": '"candles": 60'},
         ),
     },
     {
@@ -133,9 +133,9 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 138, "contains": '"/fapi/v1/ticker/24hr"'},
+            {"path": "app/data/exchange_clients/binance_futures.py", "line": 143, "contains": '"/fapi/v1/ticker/24hr"'},
             {"path": "app/data/normalizers/bybit.py", "line": 79, "contains": '"bybit.ticker"'},
-            {"path": "app/cache/market_data_cache.py", "line": 60, "contains": '"ticker": 15'},
+            {"path": "app/cache/market_data_cache.py", "line": 62, "contains": '"ticker": 15'},
         ),
     },
     {
@@ -201,10 +201,10 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "code_refs": (
             {"path": "app/data/derivatives_source_evidence.py", "line": 48, "contains": '"/fapi/v1/fundingRate"'},
             {"path": "app/data/derivatives_source_evidence.py", "line": 52, "contains": '"/v5/market/funding/history"'},
-            {"path": "app/pipeline/scanner_runner.py", "line": 2491, "contains": "async def _fetch_optional_market_data("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4623, "contains": "def _derivatives_enrichment_input("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4648, "contains": "def _derivatives_rejection("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 1726, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
+            {"path": "app/pipeline/scanner_runner.py", "line": 2561, "contains": "async def _fetch_optional_market_data("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4761, "contains": "def _derivatives_enrichment_input("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4786, "contains": "def _derivatives_rejection("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 1761, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
         ),
     },
     {
@@ -303,7 +303,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/microstructure/models.py", "line": 14, "contains": "aggTrade"},
-            {"path": "app/core/config.py", "line": 91, "contains": "microstructure_flow_enabled: bool = False"},
+            {"path": "app/core/config.py", "line": 93, "contains": "microstructure_flow_enabled: bool = False"},
         ),
     },
     {
@@ -336,7 +336,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/microstructure/order_book_service.py", "line": 103, "contains": '"/fapi/v1/depth"'},
-            {"path": "app/core/config.py", "line": 97, "contains": "order_book_liquidity_enabled: bool = False"},
+            {"path": "app/core/config.py", "line": 99, "contains": "order_book_liquidity_enabled: bool = False"},
         ),
     },
     {
@@ -369,7 +369,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/microstructure/liquidation.py", "line": 58, "contains": "def parse_binance_liquidation("},
-            {"path": "app/core/config.py", "line": 94, "contains": "liquidation_flow_enabled: bool = False"},
+            {"path": "app/core/config.py", "line": 96, "contains": "liquidation_flow_enabled: bool = False"},
         ),
     },
     {
@@ -402,7 +402,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/context/btc.py", "line": 19, "contains": 'BTC_CONTEXT_TIMEFRAMES = ("12h", "2h", "15m")'},
-            {"path": "app/core/config.py", "line": 83, "contains": "btc_context_enabled: bool = True"},
+            {"path": "app/core/config.py", "line": 85, "contains": "btc_context_enabled: bool = True"},
         ),
     },
     {
@@ -434,8 +434,8 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/pipeline/scanner_runner.py", "line": 296, "contains": "market_regime_enabled: bool = False"},
-            {"path": "app/pipeline/scanner_runner.py", "line": 2062, "contains": '"ETHUSDT", "eth_candles"'},
+            {"path": "app/pipeline/scanner_runner.py", "line": 305, "contains": "market_regime_enabled: bool = False"},
+            {"path": "app/pipeline/scanner_runner.py", "line": 2103, "contains": '"ETHUSDT", "eth_candles"'},
         ),
     },
     {
@@ -564,9 +564,9 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/universe/symbol_universe.py", "line": 588, "contains": '"/tickers"'},
-            {"path": "app/universe/symbol_universe.py", "line": 514, "contains": "qualified_rank_above_cohort"},
-            {"path": "app/universe/symbol_universe.py", "line": 760, "contains": "STABLECOIN_BASES"},
+            {"path": "app/universe/symbol_universe.py", "line": 612, "contains": '"/tickers"'},
+            {"path": "app/universe/symbol_universe.py", "line": 526, "contains": "qualified_rank_above_cohort"},
+            {"path": "app/universe/symbol_universe.py", "line": 784, "contains": "STABLECOIN_BASES"},
         ),
     },
     {
@@ -599,7 +599,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/context/macro_providers.py", "line": 44, "contains": "BLS_CALENDAR_URL"},
-            {"path": "app/core/config.py", "line": 87, "contains": "macro_event_context_enabled: bool = True"},
+            {"path": "app/core/config.py", "line": 89, "contains": "macro_event_context_enabled: bool = True"},
         ),
     },
     {
@@ -700,8 +700,8 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "scripts/run_scan.py", "line": 618, "contains": "default=60.0"},
-            {"path": "app/watch_supervisor.py", "line": 82, "contains": "first_next_start = scheduled + interval"},
+            {"path": "scripts/run_scan.py", "line": 627, "contains": "default=60.0"},
+            {"path": "app/watch_supervisor.py", "line": 107, "contains": "first_next_start = scheduled + interval"},
         ),
     },
 )

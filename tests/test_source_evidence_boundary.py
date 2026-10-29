@@ -545,7 +545,7 @@ def test_legacy_file_cache_hit_remains_unverified(tmp_path: Path) -> None:
     assert "created_at" in stored_entry
     assert "acquisition_completed_at" not in stored_entry
     second_client = FetchAdvancingClient(CacheClock(5_000.0), advance=0.0)
-    second_cache = MarketDataCache(file_path=cache_path, now=CacheClock(1_001.0))
+    second_cache = MarketDataCache(file_path=cache_path, now=CacheClock(1_000.5))
     second = run(CachedMarketDataClient(second_client, second_cache).get_klines("BTCUSDT", "15m", 1))
     assert second == first
     assert first_client.calls == 1

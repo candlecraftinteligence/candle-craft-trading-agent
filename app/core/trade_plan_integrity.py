@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 
 TradeDirection = Literal["long", "short"]
+PUBLIC_TP2_MINIMUM_RR = Decimal("3.0")
 
 
 class TradePlanFailure(str, Enum):
@@ -47,6 +48,7 @@ class TradePlanIntegrityResult:
     rr: Decimal | None = None
     rr_target: str = "tp2"
     entry_reference_type: str = "N/A"
+    execution_cost: Decimal = Decimal("0")
 
 
 class _PlanInputError(ValueError):
@@ -68,6 +70,7 @@ def validate_trade_plan(
     minimum_rr: Any = None,
     require_all_targets: bool = True,
     entry_reference_type: str = "N/A",
+    execution_cost: Any = Decimal("0"),
 ) -> TradePlanIntegrityResult:
     side = str(direction).strip().lower()
     if side not in {"long", "short"}:
@@ -84,8 +87,11 @@ def validate_trade_plan(
             _optional_decimal(tp3, "tp3", required=require_all_targets),
         )
         minimum = _optional_decimal(minimum_rr, "minimum_rr", required=False)
+        cost = _required_decimal(execution_cost, "execution_cost")
     except _PlanInputError as exc:
         return _failed(exc.reason)
+    if cost < 0:
+        return _failed("negative_execution_cost")
 
     named_prices = {
         "entry_low": low,
@@ -128,11 +134,12 @@ def validate_trade_plan(
         return _failed(TradePlanFailure.ZERO_RISK)
     if risk < 0:
         return _failed(TradePlanFailure.NEGATIVE_RISK)
+    risk += cost
 
     rr_target = target_values[1]
     reward: Decimal | None = None
     if rr_target is not None:
-        reward = rr_target - entry if side == "long" else entry - rr_target
+        reward = (rr_target - entry if side == "long" else entry - rr_target) - cost
         if reward == 0:
             return _failed(TradePlanFailure.ZERO_REWARD)
         if reward < 0:
@@ -179,6 +186,7 @@ def validate_trade_plan(
                 reward=reward,
                 rr=rr,
                 entry_reference_type=entry_reference_type,
+                execution_cost=cost,
             )
     elif minimum is not None:
         return _failed(f"{TradePlanFailure.MISSING_COMPONENT.value}:tp2")
@@ -196,7 +204,31 @@ def validate_trade_plan(
         reward=reward,
         rr=rr,
         entry_reference_type=entry_reference_type,
+        execution_cost=cost,
     )
+
+
+def validate_public_trade_plan(*, direction: Any, entry_low: Any, entry_high: Any,
+                               stop_loss: Any, tp1: Any, tp2: Any, tp3: Any,
+                               minimum_rr: Any = PUBLIC_TP2_MINIMUM_RR,
+                               execution_cost: Any = Decimal("0")) -> TradePlanIntegrityResult:
+    """One public economic contract: worst entry, final stop, net TP2 RR >= 3.
+
+    This delegates all geometry and arithmetic to the same plan validator used
+    by the strategy; delivery and lifecycle must not construct another plan.
+    """
+    try:
+        low = _required_decimal(entry_low, "entry_low")
+        high = _required_decimal(entry_high, "entry_high")
+        minimum = _required_decimal(minimum_rr, "minimum_rr")
+    except _PlanInputError as exc:
+        return _failed(exc.reason)
+    side = str(direction).strip().lower()
+    return validate_trade_plan(direction=side, entry_low=low, entry_high=high,
+        entry_reference=high if side == "long" else low,
+        stop_loss=stop_loss, tp1=tp1, tp2=tp2, tp3=tp3,
+        minimum_rr=max(PUBLIC_TP2_MINIMUM_RR, minimum), execution_cost=execution_cost,
+        entry_reference_type="worst_entry_zone_edge")
 
 
 def _required_decimal(value: Any, name: str) -> Decimal:
@@ -240,11 +272,13 @@ def _result(
     reward: Decimal | None,
     rr: Decimal | None,
     entry_reference_type: str,
+    execution_cost: Decimal = Decimal("0"),
 ) -> TradePlanIntegrityResult:
     return TradePlanIntegrityResult(
         valid=valid,
         reason=reason,
         direction=side,  # type: ignore[arg-type]
+        execution_cost=execution_cost,
         entry_low=low,
         entry_high=high,
         entry_reference=entry,
