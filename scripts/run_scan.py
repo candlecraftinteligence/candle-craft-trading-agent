@@ -4783,8 +4783,8 @@ class WatchPhaseProfile(PhaseProfile):
                 candidate = PhaseProfile()
                 if isinstance(candidate, _CorePhaseProfile) and hasattr(candidate, "_clock"):
                     clock = candidate._clock
-            except Exception:
-                pass
+            except (TypeError, AttributeError):
+                clock = None
         super().__init__(clock=clock)
 
     def snapshot(self, *, boundary: str) -> dict[str, Any]:
