@@ -145,3 +145,39 @@ synthetic plans. Their deduplication, delivery and milestone assertions remain;
 negative tests explicitly retain the old failing geometry. Historical outcome
 fixtures retain their default economics; only prospective transport fixtures
 opt into a qualifying plan before persistence/ownership is established.
+
+## Acquisition, supporting evidence and persistence (group D)
+
+One watch owner now retains one public HTTP pool and market cache across its
+sequential iterations. Shared identical acquisitions are cancellation-safe;
+shutdown cancels and joins pending fetches. Closed 1D/12H/4H/15M data expires at
+the next actual candle boundary. A delayed latest close gets at most a one-second
+retry window, never a full-day stale cache. Original acquisition facts survive
+cache delivery. Bulk exchange metadata is reused for five minutes, preserving
+its original receipt time. Explicit historical cutoffs reject later metadata.
+
+HTTP concurrency is four, with smaller endpoint budgets for metadata and
+derivatives histories. Shared 418/429 cooldowns honor numeric or dated Retry-After;
+retries have bounded exponential jitter. Response bodies, retry history, cache
+entries, disk-cache bytes and in-flight requests have explicit caps. Existing
+WebSocket resynchronization and untrusted-state clearing remain authoritative.
+
+The existing derivatives source-truth evaluator supplies compact optional
+supporting context. Its research enforcement flags remain unchanged. Only fresh,
+unit-compatible, identity-verified values available at the structural cutoff
+reach existing numeric guards. Later supporting observations retain a separate
+cutoff and cannot supply structural confirmation. Missing values are N/A;
+disconnected, stale and unverified streams are never promoted. A synchronized
+causal book spread may increase modeled execution costs, never reduce them.
+
+The actual SQLite path already uses merged lossless symbol references to avoid
+duplicating full symbol payloads in scan rows. Its equality/hash checks and epoch,
+transaction, ownership and cancellation boundaries are preserved. The new
+context is bounded and stored once per symbol, without raw streams or duplicate
+copies for each strategy mode. No new database or persistence framework is added.
+
+Verification: 158 passed in 32.22 seconds (source truth, candles, acquisition and
+WebSocket recovery); 112 passed in 33.22 seconds (watch, cache, HTTP and disposable
+SQLite storage); final ownership/freshness/spread checks: 27 passed in 1.27 seconds.
+These runs overlap. Compileall and diff checks passed. The final full suite and
+real-scanner positive product fixtures remain pending.

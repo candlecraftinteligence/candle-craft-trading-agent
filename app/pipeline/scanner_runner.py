@@ -142,6 +142,7 @@ from app.data.timeframes import resample_ohlcv_candles
 from app.analytics.selective_fibonacci import LEGACY_VERSION, SELECTIVE_VERSION, StrategyVersion
 from app.data.instrument_precision import InstrumentPrecision
 from app.core.rejection_category import rejection_category
+from app.analytics.derivatives_context import assess_native_context, admitted_strategy_values, observed_stream_context, observed_spread
 from app.strategies.selective_timeframes import HIERARCHY
 from app.core.minimum_rr import (
     DEFAULT_CONFIGURED_MINIMUM_RR,
@@ -556,6 +557,7 @@ class ScannerSymbolResult(BaseModel):
     error_message: str | None = None
     rejection_reason: str | None = None
     rejection_category: str = NA
+    derivatives_supporting_context: dict[str, Any] | None = None
     runtime_seconds: float | None = None
     timed_out: bool = False
     timeout_status: Literal["none", "request_timeout", "symbol_timeout", "global_timeout"] = "none"
@@ -844,6 +846,7 @@ class _OptionalMarketData(BaseModel):
     derivatives_instrument: Any | None = Field(default=None, exclude=True, repr=False)
     derivatives_decision_cutoff: datetime | None = Field(default=None, exclude=True)
     derivatives_frozen_bundle: Any | None = Field(default=None, exclude=True, repr=False)
+    supporting_context: dict[str, Any] | None = None
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -949,6 +952,7 @@ class ScannerRunner:
         resume_metadata: Mapping[str, Any] | None = None,
     ) -> ScannerRunResult:
         run_config = config if isinstance(config, ScannerRunConfig) else ScannerRunConfig.model_validate(config)
+        implicit_decision_clock = run_config.decision_timestamp is None
         if run_config.decision_timestamp is None:
             run_config = run_config.model_copy(
                 update={
@@ -981,6 +985,16 @@ class ScannerRunner:
         )
 
         try:
+            if implicit_decision_clock and run_config.strategy_version == SELECTIVE_VERSION and run_config.enable_strategy_output:
+                underlying = client.client if isinstance(client, CachedMarketDataClient) else client
+                bulk_metadata = getattr(underlying, "get_exchange_info", None)
+                if callable(bulk_metadata):
+                    try:
+                        await self._request_public_api(run_config, "shared instrument metadata", bulk_metadata)
+                    except Exception as exc:
+                        self.logger.debug("Instrument metadata unavailable: %s", type(exc).__name__)
+                # Precision acquisition predates the logical strategy cutoff.
+                run_config = run_config.model_copy(update={"decision_timestamp": normalize_utc_timestamp(self.clock())})
             if run_config.macro_event_context_enabled:
                 macro_event_snapshot = await self._build_macro_event_snapshot(
                     run_config,
@@ -1098,6 +1112,8 @@ class ScannerRunner:
             setattr(exc, "scanner_completed_results", tuple(results))
             raise
         finally:
+            if isinstance(client, CachedMarketDataClient):
+                await client.cache.aclose()
             if owns_client and hasattr(client, "aclose"):
                 await _maybe_await(client.aclose())
 
@@ -2260,6 +2276,8 @@ class ScannerRunner:
                           decision_timestamp=config.decision_timestamp,
                           execution_friction_bps=config.execution_friction_bps)
         if config.strategy_version == SELECTIVE_VERSION:
+            base_input["spread"] = observed_spread(order_book_liquidity, symbol=symbol,
+                cutoff=config.decision_timestamp, stale_seconds=config.order_book_liquidity_stale_sec)
             precision = None
             method = getattr(client, "get_price_precision", None)
             if callable(method):
@@ -2267,7 +2285,7 @@ class ScannerRunner:
                     precision = await self._request_public_api(config, f"{symbol} price precision", lambda: method(symbol))
                 except Exception as exc:
                     self.logger.debug("Instrument precision unavailable for %s: %s", symbol, exc)
-            if isinstance(precision, InstrumentPrecision) and precision.verified_for(config.exchange, symbol, datetime.now(UTC)):
+            if isinstance(precision, InstrumentPrecision) and precision.verified_for(config.exchange, symbol, config.decision_timestamp):
                 base_input.update(tick_size=precision.tick_size, precision_source=precision.source_endpoint)
         diagnostics: dict[str, Any] = {}
         valid_modes: list[str] = []
@@ -2656,7 +2674,7 @@ class ScannerRunner:
                 )
                 instrument = frozen.instrument
 
-        return _OptionalMarketData(
+        result = _OptionalMarketData(
             cmc_native_evidence={label: item for label, _v, _m, _w, item in optional_results if item is not None}
             if config.cmc_mode != "off" else None,
             ticker=ticker,
@@ -2675,6 +2693,23 @@ class ScannerRunner:
             derivatives_decision_cutoff=config.decision_timestamp,
             derivatives_frozen_bundle=frozen,
         )
+        if config.strategy_version == SELECTIVE_VERSION:
+            if not config.derivatives_source_truth_shadow:
+                evidence = {label: item for label, _v, _m, _w, item in optional_results if item is not None}
+                instrument = (await self._shadow_instrument(client, symbol, config)
+                              if not withhold_shadow_instrument else None)
+            try:
+                observed_at = normalize_utc_timestamp(self.capture_clock(), field_name="supporting_context_cutoff")
+            except Exception:
+                observed_at = None
+            assessment, context = assess_native_context(evidence=evidence, instrument=instrument,
+                strategy_cutoff=config.decision_timestamp, observed_at=observed_at)
+            context["freshness_seconds"] = {"aggregate_flow": config.microstructure_flow_stale_sec,
+                "order_book": config.order_book_liquidity_stale_sec, "liquidations": config.liquidation_flow_stale_sec}
+            result = result.model_copy(update={**admitted_strategy_values(assessment),
+                "supporting_context": context, "derivatives_evidence": evidence,
+                "derivatives_instrument": instrument})
+        return result
 
     async def _optional_call(
         self,
@@ -2684,10 +2719,10 @@ class ScannerRunner:
         config: ScannerRunConfig,
         label: str,
     ) -> tuple[str, Any | None, str | None, str | None, Any | None]:
-        evidence_method = getattr(client, f"{method_name}_with_evidence", None) if (config.derivatives_source_truth_shadow or config.cmc_mode != "off") else None
+        evidence_method = getattr(client, f"{method_name}_with_evidence", None) if (config.derivatives_source_truth_shadow or config.cmc_mode != "off" or config.strategy_version == SELECTIVE_VERSION) else None
         method = evidence_method if callable(evidence_method) else getattr(client, method_name, None)
         if not callable(method):
-            evidence = _shadow_unavailable(label, symbol, "adapter_has_no_source_evidence") if config.derivatives_source_truth_shadow else None
+            evidence = _shadow_unavailable(label, symbol, "adapter_has_no_source_evidence") if (config.derivatives_source_truth_shadow or config.strategy_version == SELECTIVE_VERSION) else None
             return label, None, f"{label}: N/A", None, evidence
         try:
             if callable(evidence_method):
@@ -2706,13 +2741,13 @@ class ScannerRunner:
             )
             evidence = (
                 _shadow_unavailable(label, symbol, "adapter_has_no_source_evidence")
-                if config.derivatives_source_truth_shadow
+                if config.derivatives_source_truth_shadow or config.strategy_version == SELECTIVE_VERSION
                 else None
             )
             return label, value, None, None, evidence
         except Exception as exc:
             self.logger.debug("Optional %s fetch failed for symbol=%s: %s", label, symbol, exc)
-            evidence = _shadow_unavailable(label, symbol, "source_fetch_failed") if config.derivatives_source_truth_shadow else None
+            evidence = _shadow_unavailable(label, symbol, "source_fetch_failed") if (config.derivatives_source_truth_shadow or config.strategy_version == SELECTIVE_VERSION) else None
             return label, None, f"{label}: N/A", f"{label} unavailable from public endpoint: {exc}", evidence
 
     async def _shadow_instrument(self, client: BaseExchangeClient, symbol: str, config: ScannerRunConfig) -> Any:
@@ -2910,8 +2945,30 @@ class ScannerRunner:
             getattr(setup_quality.quality_grade, "value", setup_quality.quality_grade)
         )
         shadow, causal = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
+        supporting_context = optional_data.supporting_context
+        if supporting_context is not None:
+            try:
+                observed_at = normalize_utc_timestamp(self.capture_clock(), field_name="supporting_context_cutoff")
+            except Exception:
+                observed_at = None
+            limits = supporting_context["freshness_seconds"]
+            _, supporting_context = assess_native_context(evidence=optional_data.derivatives_evidence,
+                instrument=optional_data.derivatives_instrument,
+                strategy_cutoff=optional_data.derivatives_decision_cutoff, observed_at=observed_at)
+            supporting_context["streams"] = {
+                "aggregate_flow": observed_stream_context(strategy_execution.microstructure_flow,
+                    as_of=observed_at, stale_seconds=limits["aggregate_flow"], expected_symbol=symbol,
+                    limitation="Observed aggregate trades/CVD; never structural confirmation."),
+                "order_book": observed_stream_context(strategy_execution.order_book_liquidity,
+                    as_of=observed_at, stale_seconds=limits["order_book"], expected_symbol=symbol,
+                    limitation="Visible liquidity may be cancelled; no guarantee of resting orders."),
+                "liquidations": observed_stream_context(strategy_execution.liquidation_flow,
+                    as_of=observed_at, stale_seconds=limits["liquidations"], expected_symbol=symbol,
+                    limitation="Incomplete observed liquidations, not a complete heatmap."),
+            }
         return ScannerSymbolResult(
             cmc_native_evidence=optional_data.cmc_native_evidence,
+            derivatives_supporting_context=supporting_context,
             rejection_category=(NA if trade_idea is not None else strategy_execution.strategy_diagnostics.get(
                 "rejection_category", _representative_strategy_diagnostics(strategy_execution).get(
                 "rejection_category", rejection_category(rejection_reason or status.value)))),

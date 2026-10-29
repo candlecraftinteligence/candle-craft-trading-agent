@@ -17,13 +17,13 @@ class InstrumentPrecision(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     def verified_for(self, exchange: str, symbol: str, at: datetime) -> bool:
-        return (self.exchange == exchange and self.symbol == symbol and self.source_endpoint in {
+        return (at.tzinfo is not None and self.exchange == exchange and self.symbol == symbol and self.source_endpoint in {
             "/fapi/v1/exchangeInfo", "/v5/market/instruments-info"
         } and self.tick_size.is_finite() and self.tick_size > 0 and self.received_at.tzinfo is not None
             and 0 <= (at - self.received_at).total_seconds() <= 300)
 
 
-def parse_precision(payload: Any, *, exchange: str, symbol: str) -> InstrumentPrecision:
+def parse_precision(payload: Any, *, exchange: str, symbol: str, received_at: datetime | None = None) -> InstrumentPrecision:
     if not isinstance(payload, Mapping):
         raise ValueError("precision_response_not_object")
     if exchange == "binance":
@@ -53,4 +53,4 @@ def parse_precision(payload: Any, *, exchange: str, symbol: str) -> InstrumentPr
     if not tick.is_finite() or tick <= 0:
         raise ValueError("precision_tick_unverified")
     return InstrumentPrecision(exchange=exchange, symbol=symbol, tick_size=tick,
-                               source_endpoint=endpoint, received_at=datetime.now(UTC))
+                               source_endpoint=endpoint, received_at=received_at or datetime.now(UTC))

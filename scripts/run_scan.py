@@ -2648,6 +2648,10 @@ def _apply_lifecycle_if_enabled(
 
 
 def _owner_monitoring_client(args: argparse.Namespace) -> Any:
+    return _public_exchange_client(args)
+
+
+def _public_exchange_client(args: argparse.Namespace) -> Any:
     timeout = float(getattr(args, "request_timeout_sec", DEFAULT_REQUEST_TIMEOUT_SEC) or DEFAULT_REQUEST_TIMEOUT_SEC)
     if getattr(args, "exchange", "binance") == "bybit":
         from app.data.exchange_clients.bybit_linear import BybitLinearClient
@@ -3470,9 +3474,11 @@ def _scanner_runner_with_context(
     microstructure_flow_service: MicrostructureFlowService | None = None,
     order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
+    exchange_client: Any | None = None,
 ) -> Any:
     try:
         return ScannerRunner(
+            exchange_client=exchange_client,
             market_data_cache=cache,
             btc_d_context_service=btc_d_context_service,
             macro_calendar_service=macro_calendar_service,
@@ -3663,7 +3669,13 @@ async def _run_watch_mode(
     disk_worker = SerializedDiskWorker()
     lifecycle_worker = LifecycleWorker()
     loop_lag = LoopLagMonitor(interval=0.5)
+    args._watch_market_data_cache = (
+        MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
+        if args.cache_enabled else None)
+    # A single watch owner reuses one public HTTP pool across non-overlapping scans.
+    args._watch_exchange_client = None
     try:
+        args._watch_exchange_client = _public_exchange_client(args)
         await loop_lag.start()
         if microstructure_flow_service is not None:
             await microstructure_flow_service.start(startup_queued_symbols)
@@ -4168,6 +4180,13 @@ async def _run_watch_mode(
             await loop_lag.stop()
         except Exception as exc:
             isolation_errors.append(exc)
+        try:
+            if args._watch_market_data_cache is not None:
+                await args._watch_market_data_cache.aclose()
+            if args._watch_exchange_client is not None:
+                await args._watch_exchange_client.aclose()
+        except Exception as exc:
+            isolation_errors.append(exc)
         services = (microstructure_flow_service, order_book_liquidity_service, liquidation_flow_service)
         cleanup_results = await asyncio.gather(*(service.stop() for service in services if service is not None), return_exceptions=True)
         cleanup_errors = [item for item in cleanup_results if isinstance(item, BaseException)]
@@ -4536,7 +4555,8 @@ async def _run_watch_scan_iteration(
     telegram_outbox_status: dict[str, int] = {}
     telegram_delivery_summary: TelegramLifecycleDeliverySummary | None = None
     cache = (
-        MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
+        getattr(args, "_watch_market_data_cache", None)
+        or MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
         if args.cache_enabled
         else None
     )
@@ -4640,6 +4660,7 @@ async def _run_watch_scan_iteration(
             microstructure_flow_service=microstructure_flow_service,
             order_book_liquidity_service=order_book_liquidity_service,
             liquidation_flow_service=liquidation_flow_service,
+            exchange_client=getattr(args, "_watch_exchange_client", None),
         )
         try:
             scan_result = await _run_scanner(
