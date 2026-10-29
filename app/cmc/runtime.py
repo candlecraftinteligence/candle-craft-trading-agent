@@ -30,6 +30,7 @@ class Service:
         self.next_refresh = 0
         self.closed = False
         self.last_acquisition = None
+        self.universe_fetch = None  # one bounded bulk discovery response; never a new ranking authority
 
     def schedule(self):
         if not self.closed and (self.task is None or self.task.done()) and time.monotonic() >= self.next_refresh:

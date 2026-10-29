@@ -53,6 +53,61 @@ def _universe(rows, bindings, bases, *, size=100):
         generated_at=AT.isoformat(), ranking_source=CMC_MARKET_CAP_SOURCE, verified_mappings=snapshot.mappings)
 
 
+def test_discovery_reuses_original_bulk_source_within_existing_credit_guard(monkeypatch):
+    from types import SimpleNamespace
+    from app.cmc.universe import fetch_rankings
+    import app.cmc.runtime as runtime
+    clock=[AT]
+    calls=[]
+    class Client:
+        async def get(self,endpoint,params):
+            calls.append((endpoint,params))
+            row=_row(1,1,"BTC")
+            row["last_updated"]=row["quote"][0]["last_updated"]=clock[0].isoformat()
+            return _fetch([row],acquired_at=clock[0],raw={"status":{"timestamp":clock[0].isoformat()}})
+    manifest=IdentityManifest(bindings=(_binding(_row(1,1,"BTC")),))
+    service=SimpleNamespace(collector=SimpleNamespace(client=Client(),manifest=manifest),universe_fetch=None)
+    async def service_for(*args,**kwargs): return service
+    monkeypatch.setattr(runtime,"service_for",service_for)
+    async def scenario():
+        for iteration in range(288):
+            clock[0]=AT+timedelta(minutes=5*iteration)
+            snapshot=await fetch_rankings(as_of=clock[0])
+            expected=AT+timedelta(minutes=30*(iteration//6))
+            assert snapshot.source_at == snapshot.acquired_at == expected
+            assert "cmc:1" in snapshot.mappings
+        assert len(calls)==48
+        assert all(params["limit"]==500 for _,params in calls)
+        assert len(calls)*2 <= 100 and len(calls)*2*31 <= 3000
+    asyncio.run(scenario())
+
+
+def test_cached_discovery_rechecks_owner_expiry_and_never_masks_refresh_failure(monkeypatch):
+    from types import SimpleNamespace
+    from app.cmc.universe import fetch_rankings
+    import app.cmc.runtime as runtime
+    calls=[]
+    class Client:
+        async def get(self,endpoint,params):
+            calls.append(1)
+            return _fetch([_row(1,1,"BTC")]) if len(calls)==1 else _fetch(None,error="http_429")
+    binding=_binding(_row(1,1,"BTC")).model_copy(update={"expires_at":AT+timedelta(minutes=10)})
+    service=SimpleNamespace(collector=SimpleNamespace(client=Client(),manifest=IdentityManifest(bindings=(binding,))),universe_fetch=None)
+    async def service_for(*args,**kwargs): return service
+    monkeypatch.setattr(runtime,"service_for",service_for)
+    async def scenario():
+        with pytest.raises(UniverseResolutionError,match="invalid decision time"):
+            await fetch_rankings(as_of=AT.replace(tzinfo=None))
+        assert calls == []
+        assert "cmc:1" in (await fetch_rankings(as_of=AT)).mappings
+        expired=await fetch_rankings(as_of=AT+timedelta(minutes=15))
+        assert not expired.mappings and expired.acquired_at==AT and len(calls)==1
+        with pytest.raises(UniverseResolutionError,match="http_429"):
+            await fetch_rankings(as_of=AT+timedelta(minutes=30))
+        assert len(calls)==2 and service.universe_fetch.acquired_at==AT
+    asyncio.run(scenario())
+
+
 def test_full_100_boundary_unknown_collision_exclusions_and_multiplier():
     rows = [_row(825, 1, "USDT", tags=("stablecoin",)),
             _row(1001, 2, "WRAP", tags=("wrapped-tokens",)),

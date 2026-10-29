@@ -36,12 +36,15 @@ of retrying early or blocking the loop for the entire cooldown.
 
 ## Bounded provider checks (2026-10-29)
 
-Three unauthenticated GETs were attempted against the documented keyless CMC
+Initially, three unauthenticated GETs were attempted against the documented keyless CMC
 listings, cryptocurrency-map and global-metrics endpoints. All returned HTTP
 429. No credentials were read and no authenticated account quotas were checked.
-Fresh live ranking availability, actual account entitlements and commercial
-redistribution rights therefore remain **Unverified**. This blocks retiring
-CoinPaprika or asserting that CMC production activation is ready.
+At that stage, fresh live ranking availability, actual account entitlements and
+commercial redistribution rights remained **Unverified**. A later owner-approved
+bounded private capability check was completed. Account-specific results are
+kept out of this repository. Production activation still requires reviewed
+identity bindings and the applicable product license/attribution prerequisites;
+it is not authorized by development verification alone.
 
 Official references inspected:
 
@@ -50,9 +53,12 @@ Official references inspected:
 - https://coinmarketcap.com/api/documentation/pro-api-reference/tools/
 - https://coinmarketcap.com/api/pricing/
 
-The pricing page advertises commercial use, but it does not establish this
-account's plan or subscriber redistribution rights. `/v1/key/info` requires
-authentication. No inference about a specific account is made from public docs.
+The pricing page advertises commercial use. The commercial terms permit an
+integrated end-user product, including a channel/bot, subject to product scope,
+personal-use end users, attribution and user-count limits. Standalone data/API
+redistribution is restricted. Product registration/accepted terms remain owner
+rollout prerequisites. No specific account entitlement is inferred from pricing.
+See https://pro.coinmarketcap.com/user-agreement-commercial/.
 
 ## Verification environment
 
@@ -98,8 +104,8 @@ as synthetic closed bodies in the prospective wick/body assessment.
 Focused strategy, legacy, candle-freshness, RR and fake-delivery regressions:
 **327 passed in 214.06 seconds**. Final Fibonacci/CLI/command-center checks:
 **153 passed in 21.52 seconds**. These runs overlap and must not be summed.
-Full `compileall`, `pip check` and `git diff --check` passed. Exact-head full-suite,
-end-to-end product verification and CI are still pending.
+Full `compileall`, `pip check` and `git diff --check` passed. Final full-suite,
+end-to-end product verification and CI evidence is recorded below.
 
 ## Final economics and entry semantics (group C)
 
@@ -179,8 +185,8 @@ copies for each strategy mode. No new database or persistence framework is added
 Verification: 158 passed in 32.22 seconds (source truth, candles, acquisition and
 WebSocket recovery); 112 passed in 33.22 seconds (watch, cache, HTTP and disposable
 SQLite storage); final ownership/freshness/spread checks: 27 passed in 1.27 seconds.
-These runs overlap. Compileall and diff checks passed. The final full suite and
-real-scanner positive product fixtures remain pending.
+These runs overlap. Compileall and diff checks passed. Final full-suite and
+real-scanner positive product evidence is recorded below.
 
 ## Customer delivery and real product path (group E)
 
@@ -225,8 +231,8 @@ strategy/lifecycle/quality/fake-delivery tests, and 104 passing ownership,
 foreign-plan attack and active-dashboard tests. Runs overlap. A previous full
 run reported 54 failures and 4,340 passes; those failures were repaired with
 truthful positive fixture economics and updated observed-event assertions.
-The fresh full-suite run and exact-head CI are pending; this is not yet a
-functional-completion claim.
+The subsequent full-suite and CI results are recorded below; earlier failed
+runs are retained here as debugging evidence, not counted as passing checks.
 
 Old positive public fixtures asserting stronger RR than their actual TP2 were
 corrected before persistence/ownership. Existing negative cases and assertions
@@ -237,3 +243,101 @@ deduplication now creates tasks. The optional-timeout test has an explicit
 250ms delayed optional source against a 100ms request budget and additionally
 asserts the actual timeout diagnostic; mandatory setup work is not assigned an
 unrealistic 10ms budget. Source-inventory anchors/artifacts were regenerated.
+
+## Ranking refresh budget follow-up
+
+The existing CMC service retains one successful, bounded bulk discovery response
+for 30 minutes. Every delivery re-normalizes it against the current identity
+manifest, including approval and expiry; original source/acquisition timestamps
+are preserved. A failed refresh stops new discovery rather than relabelling an
+old snapshot. No second ranking source or durable raw-stream store is introduced.
+
+A deterministic 24-hour simulation of 288 five-minute scans makes 48 successful
+500-row acquisitions. At two credits each, this healthy refresh workload is 96
+credits/day or 2,976 in 31 days, within the repository's existing 100/3,000
+guards. Retries, restarts and other CMC consumers still share the existing credit
+guard; exhaustion fails closed and owned-plan monitoring continues. These are
+configuration/load calculations, not private account usage or a quota guarantee.
+Focused client/U100/storage/product checks: **58 passed in 12.29 seconds**;
+final U100/supervisor checks: **19 passed in 1.93 seconds**. Runs overlap.
+Final combined CMC/client/real-product/discovery/supervisor regression run:
+**103 passed in 44.90 seconds**. Full compileall, pip check and diff check passed.
+
+## Final DEV verification and acceptance coverage
+
+At implementation commit `037b5015904d956907bc66eec3a33e735a310d84`:
+
+- Full local Windows suite: **4,397 passed, 1 warning in 868.81 seconds**.
+- Exact-commit GitHub CI: **4,395 passed, 2 skipped, 1 warning in 368.15 seconds**.
+  The two skipped cases require real Windows CreateFile sharing semantics and
+  passed in the local Windows suite. The warning is the installed Starlette
+  test client's deprecation of its httpx integration.
+- CI dependency checks, full compileall and full pytest passed:
+  https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40918361646.
+- The later ranking-budget follow-up adds two tests; its final exact-head CI
+  result is maintained in the review record for the same PR:
+  https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/165.
+
+The following are deterministic DEV acceptance results, with mocked upstream
+responses, fake Telegram and disposable SQLite. They are not live Runtime
+benchmarks, real fills or profitability evidence.
+
+| Case | Result | Evidence |
+| --- | --- | --- |
+| 1. CMC U100 verified perpetual intersection | Passed | `test_cmc_u100_provider.py`, `_cmc_membership` in `test_integrated_signal_product.py`; unknowns, exclusions, collisions, multipliers and no backfill |
+| 2. Qualified LONG | Passed | Real ScannerRunner/native Binance normalization/risk/lifecycle/fake delivery |
+| 3. Qualified SHORT | Passed | Same path with independently evaluated SHORT fixtures |
+| 4. All three Fibonacci levels | Passed | LONG and SHORT parametrization for 0.618, 0.750 and 0.786 |
+| 5. Protected structural SL | Passed | `test_liquidity_protected_plan.py`, real product stop assertions |
+| 6. Invalid/weak/unconfirmed/sub-3R rejection | Passed | Real product negative markets, no TP3 rescue, stricter configured floor retained |
+| 7. WATCH to trigger to confirmation | Passed | Real product progression retains owner identity; separate confirming observation |
+| 8. Wick contact versus confirmation | Passed | Wick-only market rejection, simulated-contact guard, outcome contact tests |
+| 9. TP1/TP2/TP3/SL/BE history | Passed | `test_lifecycle_outcomes.py`, `test_public_tp_milestone_delivery.py`, `test_public_lifecycle_followup_delivery_incident.py` |
+| 10. Repeated scan/delivery deduplication | Passed | Real product single receipt/send plus existing outbox/ownership regressions |
+| 11. Startup CMC/discovery outage | Passed | `test_f05_source_cleanup.py`: repeated outages, monitoring every iteration, fresh recovery |
+| 12. REST and WebSocket recovery | Passed | `test_acquisition_recovery.py`, `test_websocket_recovery.py`, health/transport suites |
+| 13. Optional derivatives missing | Passed | Real product 503 fixtures and `test_native_supporting_context.py`; no invented confirmation |
+| 14. Stale mandatory source | Passed | Real product stale daily rejection, closed-candle/source-causality suites |
+| 15. SQLite/epoch integrity | Passed | Real product exact row/receipt counts and hydration; single-copy, worker, epoch and ownership suites |
+| 16. Worker shutdown/no overlap | Passed | Shared-client/cache cancellation and close; watch session/supervisor/WebSocket ownership suites |
+| 17. Bounded acquisition/resources/timing | Passed in fixtures | Concurrency/response/cache bounds, request coalescing, cadence overrun and 24-hour CMC load simulation |
+| 18. Complete truthful public plan | Passed | Six LONG/SHORT/ratio fake-delivery cases assert prices, TP2 RR, bias, confirmation, invalidation, missing context and risk warning |
+
+Real limited-hardware Runtime scan duration, peak RSS, provider outage behavior
+under production load, current production strategy/configuration and commercial
+product registration are **Unverified**. They require the separately approved
+rollout; no production operation was performed to infer them.
+
+## Deployment and rollback requirements (owner action only)
+
+1. Review PR #165 and its exact-head CI, then explicitly approve merge. Record
+   the resulting reviewed release SHA. No automatic merge is authorized.
+2. Separately approve a Runtime rollout. Before it, inspect the operator's actual
+   launch arguments and effective configuration, confirm exclusive scanner and
+   listener ownership, and preserve existing epoch/generation and database-path
+   safeguards. A development default does not prove the running Runtime version.
+3. Use the existing Python environment and normal reviewed release procedure.
+   The prospective default is `selective-fib-mtf-v2` with native 1D/12H/4H/15M;
+   explicit legacy historical configurations retain their interpretation.
+4. CMC activation additionally requires owner-reviewed current numeric-ID to
+   exact-perpetual bindings, genuine/excluded classifications, 1000-contract
+   multipliers, approval/expiry and license/product-attribution prerequisites.
+   Confirm shared quota headroom without printing secrets. Then explicitly
+   select `MARKET_CAP_PROVIDER=cmc`; CMC is the sole ranking authority in that
+   mode. The unchanged default remains CoinPaprika until this controlled switch.
+5. Validate the selected source and deterministic dry-run in DEV/staging first,
+   with Telegram dry-run and disposable storage. On the approved Runtime release,
+   observe one owned scan/watch service, one separately owned listener, fresh
+   required candles, bounded requests/cadence and delivery receipts. Do not enable
+   order execution. This document does not authorize live starts or sends.
+6. Rollback requires owner approval: stop only the affected release through the
+   normal service procedure, restore the previously reviewed release (baseline
+   `1107f1c42b29c32fec2c669cdfd19152d0608a56` for this PR) and its exact prior
+   source/strategy arguments. Preserve the authoritative SQLite database, epoch,
+   setup ownership, economic plans, outbox and receipts. Do not purge, rewrite,
+   copy, VACUUM or roll back the database. Verify release/epoch compatibility
+   before a controlled restart; if it cannot be established, keep discovery
+   stopped and require operator review.
+
+There is no schema migration in this PR. No Runtime deployment, live database
+access, `.env` edit, actual Telegram delivery or order execution occurred.

@@ -20,6 +20,10 @@ from app.universe.canonical_qualification import EXCLUSION_CATEGORIES, VerifiedC
 from app.universe.symbol_universe import UniverseResolutionError
 
 MAX_RANKING_AGE = timedelta(hours=1)
+# A 500-row snapshot costs up to two credits. Reuse it for 30 minutes: 96
+# credits/day and at most 2,976 in 31 days, within the existing 100/3,000 guard.
+# Original source/acquisition times and current binding approval still govern.
+RANKING_REFRESH_INTERVAL = timedelta(minutes=30)
 # These describe representations, not protocol sectors (e.g. liquid-staking).
 REPRESENTATIONS = {
     "stablecoin": "stablecoin", "asset-backed-stablecoin": "stablecoin",
@@ -105,16 +109,29 @@ def normalize_rankings(fetch: Fetch, manifest: IdentityManifest, *, as_of: datet
     return RankingSnapshot(tuple(assets), mappings, fetch.acquired_at, source, fetch.raw_ref)
 
 
-async def fetch_rankings() -> RankingSnapshot:
+async def fetch_rankings(*, as_of: datetime | None = None) -> RankingSnapshot:
     from app.cmc.runtime import service_for
     from app.core.config import get_settings
 
     service = await service_for(get_settings(), discovery=True)
     if service is None:
         raise UniverseResolutionError("universe_error: CMC market-cap service unavailable")
+    decision = as_of or datetime.now(UTC)
+    if decision.tzinfo is None:
+        raise UniverseResolutionError("universe_error: CMC market-cap source invalid decision time")
+    previous = getattr(service, "universe_fetch", None)
+    if previous is not None:
+        source = utc((previous.raw or {}).get("status", {}).get("timestamp"))
+        if (source is not None and source <= previous.acquired_at <= decision
+                and decision-previous.acquired_at < RANKING_REFRESH_INTERVAL
+                and decision-source <= MAX_RANKING_AGE):
+            # Re-normalize to recheck binding expiry/approval at every delivery.
+            return normalize_rankings(previous, service.collector.manifest, as_of=decision)
     client: CmcClient = service.collector.client
     # One bounded bulk request; enough headroom for excluded representations.
     # Incomplete qualification still fails closed. Never fetch farther to backfill.
     fetch = await client.get(Endpoint.LISTINGS, {"start": 1, "limit": 500,
                             "convert": "USD", "sort": "market_cap", "sort_dir": "desc"})
-    return normalize_rankings(fetch, service.collector.manifest, as_of=datetime.now(UTC))
+    snapshot = normalize_rankings(fetch, service.collector.manifest, as_of=decision if as_of else datetime.now(UTC))
+    service.universe_fetch = fetch
+    return snapshot
