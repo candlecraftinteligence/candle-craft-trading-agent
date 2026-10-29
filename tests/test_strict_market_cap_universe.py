@@ -45,7 +45,8 @@ def _asset(
     symbol: str | None = None,
     asset_id: str | None = None,
     last_updated: str | None = GENERATED_AT,
-    qualification_class: str | None = None,
+    qualification_class: str | None = "genuine",
+    classified: bool = True,
     name: str | None = None,
 ) -> dict:
     base_symbol = symbol or f"A{rank}"
@@ -57,7 +58,7 @@ def _asset(
         "last_updated": last_updated,
         "quotes": {"USD": {"market_cap": str(1_000_000 - rank)}},
     }
-    if qualification_class is not None:
+    if classified and qualification_class is not None:
         payload["qualification_class"] = qualification_class
     if last_updated is None:
         del payload["last_updated"]

@@ -40,16 +40,15 @@ from tests.test_strict_market_cap_universe import (
 
 def test_non_genuine_assets_inside_raw_top_100_do_not_backfill_the_qualified_cohort() -> None:
     assets = [
-        _asset(1, symbol="USDT", asset_id="usdt-tether", name="Tether"),
-        _asset(2, symbol="WBTC", asset_id="wbtc-wrapped-bitcoin", name="Wrapped Bitcoin"),
+        _asset(1, symbol="USDT", asset_id="usdt-tether", name="Tether", classified=False),
+        _asset(2, symbol="WBTC", asset_id="wbtc-wrapped-bitcoin", name="Wrapped Bitcoin", classified=False),
         _asset(3, symbol="DEFI", asset_id="defi-protocol", name="DeFi Artificial Intelligence Protocol"),
-        _asset(4, symbol="LOOKSWRAP", asset_id="looks-wrapped-not-registered", name="Wrapped Bitcoin"),
     ]
     assets.extend(
         _asset(rank, symbol=f"C{rank}", asset_id=f"coin-{rank}", name=f"Coin {rank}")
-        for rank in range(5, 105)
+        for rank in range(4, 104)
     )
-    matched = ["DEFI", "LOOKSWRAP", *[f"C{rank}" for rank in range(5, 105) if rank != 50]]
+    matched = ["DEFI", *[f"C{rank}" for rank in range(4, 104) if rank != 50]]
     universe = _strict_resolution(assets, matched, universe_size=100)
 
     assert universe.diagnostics["qualified_cohort_size"] == 100
@@ -57,7 +56,6 @@ def test_non_genuine_assets_inside_raw_top_100_do_not_backfill_the_qualified_coh
     assert "USDTUSDT" not in universe.resolved_symbols
     assert "WBTCUSDT" not in universe.resolved_symbols
     assert "DEFIUSDT" in universe.resolved_symbols
-    assert "LOOKSWRAPUSDT" in universe.resolved_symbols
     assert "C102USDT" in universe.resolved_symbols
     assert "C103USDT" not in universe.resolved_symbols
     assert "C50USDT" not in universe.resolved_symbols
@@ -179,23 +177,142 @@ def test_invalid_multiplier_is_rejected_and_does_not_backfill() -> None:
     assert reasons["shib-shiba-inu"] == "invalid_multiplier"
 
 
-def test_sector_tags_do_not_exclude_a_protocol_and_staking_tags_do() -> None:
-    listed = _asset(1, symbol="LST", asset_id="lst-example", name="Liquid Staked Example")
-    listed["tags"] = ["liquid-staking-tokens-lst", "defi"]
-    protocol = _asset(2, symbol="AI", asset_id="ai-sector", name="Artificial Intelligence Protocol")
-    protocol["tags"] = ["defi", "artificial-intelligence", "real-world-assets-rwa"]
-    universe = build_symbol_universe_from_market_caps(
-        [_ticker("LST"), _ticker("AI"), _ticker("BTC")],
-        [listed, protocol, _asset(3, symbol="BTC", asset_id="btc-bitcoin", name="Bitcoin")],
-        exchange_info={"symbols": [_contract("LST"), _contract("AI"), _contract("BTC")]},
-        universe_size=2,
-        generated_at=GENERATED_AT,
+def test_unclassified_wrapped_and_synthetic_names_fail_closed() -> None:
+    wrapped = _asset(
+        2,
+        symbol="LOOKSWRAP",
+        asset_id="looks-wrapped-not-registered",
+        name="Wrapped Bitcoin",
+        classified=False,
+    )
+    synthetic = _asset(
+        3,
+        symbol="SYNTH",
+        asset_id="synthetic-basket-not-registered",
+        name="Synthetic Bitcoin",
+        classified=False,
+    )
+    with pytest.raises(UniverseResolutionError, match="unclassified identity") as raised:
+        _strict_resolution(
+            [
+                _asset(1, symbol="BTC", asset_id="btc-bitcoin", name="Bitcoin"),
+                wrapped,
+                synthetic,
+                _asset(4, symbol="ETH", asset_id="eth-ethereum", name="Ethereum"),
+            ],
+            ["BTC", "LOOKSWRAP", "SYNTH", "ETH"],
+            universe_size=3,
+        )
+
+    assert "looks-wrapped-not-registered" in str(raised.value)
+    assert "ETHUSDT" not in str(raised.value)
+
+
+def test_representation_metadata_excludes_wrapped_asset_without_using_its_name() -> None:
+    wrapped = _asset(1, symbol="PLAIN", asset_id="plain-not-registered", name="Plain Asset", classified=False)
+    wrapped["tags"] = ["wrapped-token"]
+    universe = _strict_resolution(
+        [wrapped, _asset(2, symbol="BTC", asset_id="btc-bitcoin", name="Bitcoin")],
+        ["PLAIN", "BTC"],
+        universe_size=1,
     )
 
-    assert universe.resolved_symbols == ("AIUSDT", "BTCUSDT")
-    assert "LSTUSDT" not in universe.resolved_symbols
+    assert universe.resolved_symbols == ("BTCUSDT",)
     categories = {item["provider_id"]: item["category"] for item in universe.diagnostics["qualification_exclusions"]}
-    assert categories["lst-example"] == "liquid_staked_or_restaked"
+    assert categories["plain-not-registered"] == "wrapped_or_bridged"
+
+
+def test_sector_tags_do_not_exclude_a_reviewed_protocol_token() -> None:
+    eigen = _asset(2, symbol="EIGEN", asset_id="eigen-eigenlayer", name="EigenLayer", classified=False)
+    eigen["tags"] = ["liquid-staking-tokens-lst", "restaking", "defi"]
+    receipt = _asset(1, symbol="STETH", asset_id="steth-lido-staked-ether", name="Lido Staked Ether", classified=False)
+    sector_only = _asset(1, symbol="LST", asset_id="lst-sector-only", name="Liquid Staking Sector", classified=False)
+    sector_only["tags"] = ["liquid-staking-tokens-lst", "defi"]
+    universe = _strict_resolution(
+        [receipt, eigen],
+        ["STETH", "EIGEN"],
+        universe_size=1,
+    )
+
+    assert universe.resolved_symbols == ("EIGENUSDT",)
+    categories = {item["provider_id"]: item["category"] for item in universe.diagnostics["qualification_exclusions"]}
+    assert categories["steth-lido-staked-ether"] == "liquid_staked_or_restaked"
+    with pytest.raises(UniverseResolutionError, match="unclassified identity"):
+        _strict_resolution([sector_only], ["LST"], universe_size=1)
+
+
+def test_conflicting_classification_fails_closed() -> None:
+    with pytest.raises(UniverseResolutionError, match="ambiguous identity evidence"):
+        _strict_resolution(
+            [_asset(1, symbol="BTC", asset_id="btc-bitcoin", qualification_class="stablecoin")],
+            ["BTC"],
+            universe_size=1,
+        )
+    with pytest.raises(UniverseResolutionError, match="ambiguous identity evidence"):
+        _strict_resolution(
+            [_asset(1, symbol="WBTC", asset_id="wbtc-wrapped-bitcoin", qualification_class="genuine")],
+            ["WBTC"],
+            universe_size=1,
+        )
+    conflict = _asset(1, symbol="BOTH", asset_id="both-unregistered", classified=False)
+    conflict["tags"] = ["cryptocurrency", "stablecoin"]
+    with pytest.raises(UniverseResolutionError, match="ambiguous identity evidence"):
+        _strict_resolution([conflict], ["BOTH"], universe_size=1)
+
+
+def test_cryptocurrency_category_metadata_is_positive_evidence() -> None:
+    native = _asset(1, symbol="NATIVE", asset_id="native-unregistered", classified=False)
+    native["tags"] = ["cryptocurrency", "defi"]
+    universe = _strict_resolution([native], ["NATIVE"], universe_size=1)
+
+    assert universe.resolved_symbols == ("NATIVEUSDT",)
+
+
+def test_explicit_synthetic_classification_does_not_backfill() -> None:
+    universe = _strict_resolution(
+        [
+            _asset(1, symbol="SYN", asset_id="syn-basket", qualification_class="synthetic"),
+            _asset(2, symbol="BTC", asset_id="btc-bitcoin"),
+            _asset(3, symbol="TAIL", asset_id="tail-coin"),
+        ],
+        ["SYN", "BTC", "TAIL"],
+        universe_size=1,
+    )
+
+    assert universe.resolved_symbols == ("BTCUSDT",)
+    assert "TAILUSDT" not in universe.resolved_symbols
+    categories = {item["provider_id"]: item["category"] for item in universe.diagnostics["qualification_exclusions"]}
+    assert categories["syn-basket"] == "synthetic"
+
+
+def test_stale_explicit_classification_fails_closed() -> None:
+    with pytest.raises(UniverseResolutionError, match="stale ranking"):
+        _strict_resolution(
+            [
+                _asset(
+                    1,
+                    symbol="NEW",
+                    asset_id="new-unregistered",
+                    qualification_class="genuine",
+                    last_updated="2026-08-21T00:00:00Z",
+                )
+            ],
+            ["NEW"],
+            universe_size=1,
+        )
+
+
+def test_unclassified_identity_keeps_owner_monitoring_available() -> None:
+    from app.lifecycle.owner_monitoring import discovery_failure_continues_owner_monitoring
+
+    with pytest.raises(UniverseResolutionError, match="unclassified identity") as raised:
+        _strict_resolution(
+            [_asset(1, symbol="UNKNOWN", asset_id="unknown-asset", classified=False)],
+            ["UNKNOWN"],
+            universe_size=1,
+        )
+
+    assert discovery_failure_continues_owner_monitoring(raised.value) is True
 
 
 def test_low_quote_volume_does_not_backfill_from_above_the_cohort() -> None:

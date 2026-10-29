@@ -8,6 +8,11 @@ The cohort size is never larger than the canonical Top-100 limit.
 Identity mapping uses the provider id plus exchange contract metadata.
 A shared ticker is not enough. Verified multiplier mappings record the
 exchange price unit and never rescale it.
+
+An asset is genuine only with an explicit classification, a reviewed provider
+id, or provider category metadata that identifies the asset itself. Sector
+tags and names are not that evidence. An unclassified identity inside the
+window needed to fill the cohort fails new discovery closed.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ CANONICAL_RANKING_FUTURE_SKEW = timedelta(minutes=5)
 EXCHANGE_CONTRACT_PRICE_BASIS = "exchange_contract_unit"
 
 CATEGORY_GENUINE = "genuine"
+CATEGORY_UNCLASSIFIED = "unclassified"
 CATEGORY_STABLECOIN = "stablecoin"
 CATEGORY_COMMODITY_PEGGED = "commodity_pegged"
 CATEGORY_WRAPPED_OR_BRIDGED = "wrapped_or_bridged"
@@ -45,18 +51,17 @@ EXCLUSION_CATEGORIES = frozenset(
     }
 )
 
-# Payload tags that identify a non-genuine representation. Sector tags such as
-# defi, meme, rwa, and layer-1 are intentionally absent.
-EXCLUSION_TAG_PRIORITY = (
+# Representation tags describe what the asset is. Sector tags such as
+# liquid-staking, restaking, defi, meme, and derivative describe an affiliation
+# and are not membership evidence. eigen-eigenlayer carries liquid-staking and
+# restaking tags and remains the EigenLayer protocol token.
+REPRESENTATION_TAG_PRIORITY = (
     ("stablecoin", CATEGORY_STABLECOIN),
     ("gold-backed", CATEGORY_COMMODITY_PEGGED),
     ("xstocks-ecosystem", CATEGORY_TOKENIZED_SECURITY),
     ("wrapped-token", CATEGORY_WRAPPED_OR_BRIDGED),
-    ("liquid-staking-tokens-lst", CATEGORY_LIQUID_STAKED_OR_RESTAKED),
-    ("liquid-staking-derivatives-lsd", CATEGORY_LIQUID_STAKED_OR_RESTAKED),
-    ("liquid-restaking-tokens", CATEGORY_LIQUID_STAKED_OR_RESTAKED),
-    ("restaking", CATEGORY_LIQUID_STAKED_OR_RESTAKED),
 )
+POSITIVE_CRYPTOCURRENCY_TAG = "cryptocurrency"
 
 # Tag-index evidence reviewed on 2026-10-29 against CoinPaprika /v1/tickers.
 # eigen-eigenlayer is omitted: the LST tag on that id names the EigenLayer
@@ -236,6 +241,91 @@ VERIFIED_CONTRACT_MAPPINGS: dict[str, VerifiedContractMapping] = {
     item.provider_id: item for item in _VERIFIED_CONTRACT_MAPPINGS
 }
 
+# Positive genuine classification reviewed from CoinPaprika coin-page category
+# tags on 2026-10-29. A chain-standard tag alone (erc20, bnb-token, sol-token)
+# is not this evidence. Empty tag sets are not this evidence. Names are not
+# consulted at runtime.
+# Intentionally absent: rain-rain-protocol, m-memecore, jst-just, aster-aster,
+# vvv-venice-token, bdx-beldex, pyth-pyth-network.
+_REVIEWED_GENUINE_PROVIDER_IDS = (
+    "btc-bitcoin",
+    "eth-ethereum",
+    "bnb-binance-coin",
+    "xrp-xrp",
+    "sol-solana",
+    "trx-tron",
+    "zec-zcash",
+    "hype-hyperliquid",
+    "doge-dogecoin",
+    "xmr-monero",
+    "wbt-whitebit",
+    "link-chainlink",
+    "leo-leo-token",
+    "ada-cardano",
+    "xlm-stellar",
+    "near-near-protocol",
+    "bch-bitcoin-cash",
+    "uni-uniswap",
+    "ltc-litecoin",
+    "cc-canton-network",
+    "sui-sui",
+    "avax-avalanche",
+    "toncoin-the-open-network",
+    "hbar-hedera-hashgraph",
+    "shib-shiba-inu",
+    "cro-cryptocom-chain",
+    "ena-ethena",
+    "tao-bittensor",
+    "okb-okb",
+    "qnt-quant",
+    "pepe-pepe",
+    "aave-new",
+    "ondo-ondo",
+    "pump-pumpfun",
+    "dot-polkadot",
+    "wlfi-official-world-liberty-financial",
+    "mnt-mantle",
+    "wld-worldcoin",
+    "icp-internet-computer",
+    "ftm-fantom",
+    "bgb-bitget-token",
+    "agix-singularitynet",
+    "etc-ethereum-classic",
+    "arb-arbitrum",
+    "kcs-kucoin-token",
+    "kas-kaspa",
+    "pol-polygon-ecosystem-token",
+    "algo-algorand",
+    "jup-jupiter-exchange-token",
+    "pi2-pi-network",
+    "rndr-render-token",
+    "inj-injective-protocol",
+    "fil-filecoin",
+    "lit-lighter",
+    "cake-pancakeswap",
+    "night-midnight2",
+    "dash-dash",
+    "ethfi-etherfi",
+    "atom-cosmos",
+    "apt-aptos",
+    "aero-aerodrome-finance",
+    "stx-stacks",
+    "bianrensheng-bianrensheng",
+    "eigen-eigenlayer",
+)
+
+
+def _build_genuine_registry() -> frozenset[str]:
+    merged = set(_REVIEWED_GENUINE_PROVIDER_IDS)
+    merged.update(VERIFIED_CONTRACT_MAPPINGS)
+    overlap = sorted(merged.intersection(EXCLUSION_BY_PROVIDER_ID))
+    if overlap:
+        raise RuntimeError(f"genuine registry overlaps exclusions: {', '.join(overlap)}")
+    return frozenset(merged)
+
+
+GENUINE_BY_PROVIDER_ID = _build_genuine_registry()
+
 
 class CanonicalUniverseError(RuntimeError):
     """The ranking snapshot cannot support a qualified cohort."""
@@ -350,6 +440,11 @@ def qualify_canonical_cohort(
         updated = _require_fresh_timestamp(raw_asset, provider_id=provider_id, acquired_at=acquired_at)
         window_updates.append(updated)
         category = _category_for_asset(raw_asset)
+        if category == CATEGORY_UNCLASSIFIED:
+            raise CanonicalUniverseError(
+                "universe_error: CoinPaprika market-cap source returned unclassified identity "
+                f"(provider id {provider_id} has no reviewed cryptocurrency classification)"
+            )
         if category != CATEGORY_GENUINE:
             exclusion_counts[category] = exclusion_counts.get(category, 0) + 1
             exclusions.append(
@@ -469,16 +564,28 @@ def _genuine_symbol_counts(provider_assets: Sequence[Mapping[str, Any]]) -> dict
 def _category_for_asset(raw_asset: Mapping[str, Any]) -> str:
     provider_id = _provider_id(raw_asset) or ""
     explicit = _explicit_category(raw_asset)
-    tagged = _tagged_category(raw_asset)
-    registered = EXCLUSION_BY_PROVIDER_ID.get(provider_id)
-    chosen = explicit or tagged or registered or CATEGORY_GENUINE
-    for candidate in (explicit, tagged, registered):
-        if candidate is not None and candidate != chosen:
+    reviewed = _reviewed_category(provider_id)
+    represented = _representation_category(raw_asset)
+    positive = _positive_cryptocurrency_category(raw_asset)
+    sources = [item for item in (explicit, reviewed, represented, positive) if item is not None]
+    if not sources:
+        return CATEGORY_UNCLASSIFIED
+    chosen = sources[0]
+    for candidate in sources[1:]:
+        if candidate != chosen:
             raise CanonicalUniverseError(
                 "universe_error: CoinPaprika market-cap source returned ambiguous identity evidence "
                 f"for {provider_id or 'missing-id'}"
             )
     return chosen
+
+
+def _reviewed_category(provider_id: str) -> str | None:
+    if not provider_id:
+        return None
+    if provider_id in GENUINE_BY_PROVIDER_ID:
+        return CATEGORY_GENUINE
+    return EXCLUSION_BY_PROVIDER_ID.get(provider_id)
 
 
 def _explicit_category(raw_asset: Mapping[str, Any]) -> str | None:
@@ -496,13 +603,26 @@ def _explicit_category(raw_asset: Mapping[str, Any]) -> str | None:
     )
 
 
-def _tagged_category(raw_asset: Mapping[str, Any]) -> str | None:
+def _representation_category(raw_asset: Mapping[str, Any]) -> str | None:
     tags = _tag_ids(raw_asset)
-    if not tags:
+    found: list[str] = []
+    for tag_id, category in REPRESENTATION_TAG_PRIORITY:
+        if tag_id in tags and category not in found:
+            found.append(category)
+    if len(found) > 1:
+        provider_id = _provider_id(raw_asset) or "missing-id"
+        raise CanonicalUniverseError(
+            "universe_error: CoinPaprika market-cap source returned ambiguous identity evidence "
+            f"for {provider_id}"
+        )
+    if not found:
         return None
-    for tag_id, category in EXCLUSION_TAG_PRIORITY:
-        if tag_id in tags:
-            return category
+    return found[0]
+
+
+def _positive_cryptocurrency_category(raw_asset: Mapping[str, Any]) -> str | None:
+    if POSITIVE_CRYPTOCURRENCY_TAG in _tag_ids(raw_asset):
+        return CATEGORY_GENUINE
     return None
 
 

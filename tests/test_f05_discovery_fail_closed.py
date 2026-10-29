@@ -47,6 +47,7 @@ def _asset(base_symbol: str, rank: int) -> dict[str, object]:
         "symbol": base_symbol,
         "name": base_symbol,
         "rank": rank,
+        "qualification_class": "genuine",
         "last_updated": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "quotes": {"USD": {"market_cap": str(1_000_000 - rank)}},
     }
