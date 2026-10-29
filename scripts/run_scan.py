@@ -173,6 +173,7 @@ from app.storage import (  # noqa: E402
 from app.storage.database import UnsupportedSchemaVersionError  # noqa: E402
 from app.runtime_epoch.errors import RuntimeEpochConfigurationError, RuntimeEpochError  # noqa: E402
 from app.runtime_epoch.models import RuntimeEpochIdentity  # noqa: E402
+from app.runtime.state_paths import RuntimeStatePaths, rebase_state_arguments  # noqa: E402
 from app.runtime_epoch.origin import register_operational_scan_run  # noqa: E402
 from app.runtime_epoch.startup import (  # noqa: E402
     require_expected_operational_identity,
@@ -249,6 +250,51 @@ PERFORMANCE_MEMORY_PATH = PROJECT_ROOT / "scan_runs" / "performance_memory.json"
 SCAN_RUN_MANIFEST_PATH = PROJECT_ROOT / "scan_runs" / "scan_run_manifest.jsonl"
 NIGHTLY_SCAN_HISTORY_PATH = PROJECT_ROOT / "scan_runs" / "nightly_scan_history.json"
 ADMIN_DRAFTS_DIR = PROJECT_ROOT / "scan_runs" / "admin_drafts"
+
+_STATE_FILENAMES = {
+    "LATEST_RUN_PATH": "latest_scan.json",
+    "PERFORMANCE_MEMORY_PATH": "performance_memory.json",
+    "SCAN_RUN_MANIFEST_PATH": "scan_run_manifest.jsonl",
+    "NIGHTLY_SCAN_HISTORY_PATH": "nightly_scan_history.json",
+    "ADMIN_DRAFTS_DIR": "admin_drafts",
+}
+
+
+def _runtime_path(args: argparse.Namespace, name: str) -> Path:
+    paths = getattr(args, "runtime_state_paths", None)
+    if paths is None:
+        return Path(globals()[name])
+    if name == "WATCH_STATE_PATH":
+        return paths.resolve(getattr(args, "runtime_watch_state_path", paths.root / "watch_state.json"))
+    return paths.resolve(_STATE_FILENAMES[name])
+
+
+def _configure_runtime_state_paths(args: argparse.Namespace, settings: Settings) -> None:
+    root = args.runtime_state_root if args.runtime_state_root is not None else settings.runtime_state_root
+    if root is None:
+        return
+    try:
+        paths = RuntimeStatePaths.from_root(
+            root, legacy_roots=(PROJECT_ROOT / "scan_runs", Path.cwd() / "scan_runs"),
+        )
+        # Validate implicit writer destinations before acquiring a lease or opening SQLite.
+        for filename in (*_STATE_FILENAMES.values(), "watch_state.json", "epochs"):
+            paths.resolve(filename)
+        rebase_state_arguments(args, paths, defaults={
+            "database_path": (DEFAULT_DATABASE_PATH, "candle_craft.db"),
+            "save_run": (Path("scan_runs/latest_scan.json"), "latest_scan.json"),
+            "export_report": (Path("scan_runs/latest_report.txt"), "latest_report.txt"),
+            "export_json": (Path("scan_runs/latest_command_center.json"), "latest_command_center.json"),
+            "export_watchlist": (Path("scan_runs/latest_watchlist.txt"), "latest_watchlist.txt"),
+            "research_output_json": (Path("scan_runs/research_report.json"), "research_report.json"),
+        }, optional=(
+            "cache_file", "resume_from", "watch_output_file", "output_json",
+            "backtest_output_json", "edge_export_json", "export_history_json",
+        ))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(f"Invalid runtime state paths: {exc}") from exc
+    args.runtime_state_paths = paths
+    args.watch_state_base_dir = paths.root
 
 
 @dataclass(frozen=True)
@@ -659,6 +705,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--save-run", nargs="?", const=Path("scan_runs/latest_scan.json"), type=Path)
     parser.add_argument("--store-scan", action="store_true")
     parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument("--runtime-state-root", type=Path, help="Isolated state directory; also RUNTIME_STATE_ROOT.")
     parser.add_argument("--runtime-epoch-id", dest="runtime_epoch_id")
     parser.add_argument("--runtime-epoch-cutoff-at", dest="runtime_epoch_cutoff_at")
     parser.add_argument("--runtime-reviewed-release-sha", dest="runtime_reviewed_release_sha")
@@ -790,6 +837,7 @@ def _watch_console_mode(args: argparse.Namespace) -> str:
 
 async def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    _configure_runtime_state_paths(args, Settings())
     report_only = (
         args.list_command_presets or args.list_presets or args.research
         or args.show_history or args.export_history_json is not None
@@ -1046,15 +1094,15 @@ async def _main(
 
     memory_enabled = _performance_memory_enabled(args)
     if args.reset_performance_memory:
-        reset_performance_memory(PERFORMANCE_MEMORY_PATH)
+        reset_performance_memory(_runtime_path(args, 'PERFORMANCE_MEMORY_PATH'))
     if memory_enabled:
-        memory_store = load_performance_memory(PERFORMANCE_MEMORY_PATH)
+        memory_store = load_performance_memory(_runtime_path(args, 'PERFORMANCE_MEMORY_PATH'))
         if replay_summary is not None:
             ingestion = ingest_replay_summary(memory_store, replay_summary)
             memory_store = ingestion.store
-            save_performance_memory(memory_store, PERFORMANCE_MEMORY_PATH)
-        elif not PERFORMANCE_MEMORY_PATH.exists():
-            save_performance_memory(memory_store, PERFORMANCE_MEMORY_PATH)
+            save_performance_memory(memory_store, _runtime_path(args, 'PERFORMANCE_MEMORY_PATH'))
+        elif not _runtime_path(args, 'PERFORMANCE_MEMORY_PATH').exists():
+            save_performance_memory(memory_store, _runtime_path(args, 'PERFORMANCE_MEMORY_PATH'))
         result = apply_performance_memory_to_result(
             result,
             memory_store,
@@ -1066,7 +1114,7 @@ async def _main(
     elif args.performance_memory is False:
         result = apply_performance_memory_to_result(
             result,
-            load_performance_memory(PERFORMANCE_MEMORY_PATH),
+            load_performance_memory(_runtime_path(args, 'PERFORMANCE_MEMORY_PATH')),
             enabled=False,
             min_confidence=args.min_memory_confidence,
         )
@@ -1095,12 +1143,14 @@ async def _main(
                 )
             except (Exception, SystemExit) as exc:
                 result = _retain_owner_monitoring_failure(result, exc)
-                _persist_one_shot_monitoring_failure(result, exc=exc, prior_errors=prior_monitoring_errors)
+                _persist_one_shot_monitoring_failure(result, exc=exc, prior_errors=prior_monitoring_errors,
+                                                    manifest_path=_runtime_path(args, 'SCAN_RUN_MANIFEST_PATH'))
                 _raise_one_shot_owner_monitoring_failure(exc, prior_errors=prior_monitoring_errors)
             else:
                 result = _retain_owner_monitoring_result(result, monitoring_result)
                 if _owner_monitoring_failure_lines(result=monitoring_result, prior_errors=prior_monitoring_errors):
-                    _persist_one_shot_monitoring_failure(result, prior_errors=prior_monitoring_errors)
+                    _persist_one_shot_monitoring_failure(result, prior_errors=prior_monitoring_errors,
+                                                        manifest_path=_runtime_path(args, 'SCAN_RUN_MANIFEST_PATH'))
                 _raise_one_shot_owner_monitoring_failure(
                     result=monitoring_result,
                     prior_errors=prior_monitoring_errors,
@@ -1111,7 +1161,7 @@ async def _main(
     try:
         telegram_summary = await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
     except (Exception, SystemExit) as exc:
-        _persist_one_shot_telegram_failure(result, exc)
+        _persist_one_shot_telegram_failure(result, exc, manifest_path=_runtime_path(args, 'SCAN_RUN_MANIFEST_PATH'))
         raise
     result = _retain_telegram_provenance(
         result, telegram_summary, requested=_telegram_lifecycle_public_delivery_enabled(args),
@@ -1226,8 +1276,8 @@ async def _main(
         result,
         watchlist=watchlist,
         ranked_results=ranked_results,
-        manifest_path=SCAN_RUN_MANIFEST_PATH,
-        nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
+        manifest_path=_runtime_path(args, 'SCAN_RUN_MANIFEST_PATH'),
+        nightly_history_path=_runtime_path(args, 'NIGHTLY_SCAN_HISTORY_PATH'),
         run_id=stored_scan_run_id,
         output_scan_path=args.output_json,
         latest_scan_path=args.save_run,
@@ -1238,6 +1288,7 @@ async def _main(
         manifest_row=manifest_row,
         database_path=args.database_path,
         expected_identity=getattr(args, "runtime_identity", None),
+        drafts_dir=_runtime_path(args, "ADMIN_DRAFTS_DIR"),
     )
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
@@ -1457,14 +1508,14 @@ def _resolve_watchlist_from_latest_run(
     membership_boundary: WatchlistResolution | None = None,
 ) -> WatchlistResolution:
     try:
-        symbols = load_symbols_from_run(LATEST_RUN_PATH, near_miss_only=args.watch_only_near_misses)
+        symbols = load_symbols_from_run(_runtime_path(args, 'LATEST_RUN_PATH'), near_miss_only=args.watch_only_near_misses)
     except WatchModeError as exc:
         raise SystemExit(str(exc)) from exc
     if not symbols:
         label = "near-miss symbols" if args.watch_only_near_misses else "symbols"
-        raise SystemExit(f"No {label} found in latest saved run file: {LATEST_RUN_PATH}")
+        raise SystemExit(f"No {label} found in latest saved run file: {_runtime_path(args, 'LATEST_RUN_PATH')}")
     if membership_boundary is None:
-        return _watch_resolution_from_symbols(args, symbols, source_label=f"latest run {LATEST_RUN_PATH}")
+        return _watch_resolution_from_symbols(args, symbols, source_label=f"latest run {_runtime_path(args, 'LATEST_RUN_PATH')}")
 
     allowed = set(membership_boundary.symbols)
     filtered = tuple(symbol for symbol in dedupe_symbols(symbols) if symbol in allowed)
@@ -1482,7 +1533,7 @@ def _resolve_watchlist_from_latest_run(
     )
     return WatchlistResolution(
         symbols=filtered,
-        source_label=f"latest run {LATEST_RUN_PATH} within strict market-cap membership",
+        source_label=f"latest run {_runtime_path(args, 'LATEST_RUN_PATH')} within strict market-cap membership",
         universe=universe,
         explicit_excluded_symbols=membership_boundary.explicit_excluded_symbols,
         pre_cap_symbols_count=membership_boundary.pre_cap_symbols_count,
@@ -1498,9 +1549,9 @@ def _filter_watchlist_to_prior_watch_symbols(
     state = _load_runtime_watch_state(args)
 
     symbols = state_watch_symbols(state, watchlist.symbols)
-    if not symbols and LATEST_RUN_PATH.exists():
+    if not symbols and _runtime_path(args, 'LATEST_RUN_PATH').exists():
         try:
-            latest_symbols = load_symbols_from_run(LATEST_RUN_PATH, near_miss_only=True)
+            latest_symbols = load_symbols_from_run(_runtime_path(args, 'LATEST_RUN_PATH'), near_miss_only=True)
         except WatchModeError as exc:
             raise SystemExit(str(exc)) from exc
         watchlist_set = set(watchlist.symbols)
@@ -1538,9 +1589,9 @@ def _extend_watchlist_for_continue_watch(
 
     state_symbols = state_watch_symbols(state, tuple(state.symbols))
     latest_symbols: tuple[str, ...] = ()
-    if LATEST_RUN_PATH.exists():
+    if _runtime_path(args, 'LATEST_RUN_PATH').exists():
         try:
-            latest_symbols = load_symbols_from_run(LATEST_RUN_PATH, near_miss_only=True)
+            latest_symbols = load_symbols_from_run(_runtime_path(args, 'LATEST_RUN_PATH'), near_miss_only=True)
         except WatchModeError as exc:
             raise SystemExit(str(exc)) from exc
 
@@ -2257,6 +2308,7 @@ async def _route_admin_report(
     console_presenter: ScannerConsolePresenter | None = None,
     database_path: Path | str | None = None,
     expected_identity: RuntimeEpochIdentity | None = None,
+    drafts_dir: Path | None = None,
 ) -> None:
     try:
         route_result = await route_admin_scan_report(
@@ -2264,7 +2316,7 @@ async def _route_admin_report(
             ranked_results=ranked_results,
             manifest_row=manifest_row,
             settings=Settings(),
-            drafts_dir=ADMIN_DRAFTS_DIR,
+            drafts_dir=drafts_dir if drafts_dir is not None else ADMIN_DRAFTS_DIR,
             database_path=database_path,
             expected_identity=expected_identity,
         )
@@ -2475,7 +2527,11 @@ def _prepare_operational_runtime_if_needed(args: argparse.Namespace, settings: S
         )
     except (RuntimeEpochError, UnsupportedSchemaVersionError) as exc:
         raise SystemExit(str(exc)) from exc
-    WATCH_STATE_PATH = runtime.watch_state_path
+    paths = getattr(args, "runtime_state_paths", None)
+    if paths is None:
+        WATCH_STATE_PATH = runtime.watch_state_path
+    else:
+        args.runtime_watch_state_path = paths.resolve(runtime.watch_state_path)
     args.runtime_epoch_id = runtime.epoch.epoch_id
     args.runtime_identity = runtime.epoch.identity
     args.watch_state_base_dir = watch_state_base_dir
@@ -2505,7 +2561,7 @@ def _canonical_watch_state_base_dir(args: argparse.Namespace) -> Path:
     stored = getattr(args, "watch_state_base_dir", None)
     if stored:
         return Path(stored)
-    path = Path(WATCH_STATE_PATH)
+    path = Path(_runtime_path(args, 'WATCH_STATE_PATH'))
     parts = path.parts
     if "epochs" in parts:
         idx = parts.index("epochs")
@@ -2528,10 +2584,10 @@ def _runtime_watch_base_dir(args: argparse.Namespace) -> Path:
 def _load_runtime_watch_state(args: argparse.Namespace):
     expected = _runtime_watch_epoch_id(args)
     if not expected:
-        return load_watch_state(WATCH_STATE_PATH)
+        return load_watch_state(_runtime_path(args, 'WATCH_STATE_PATH'))
     try:
         payload = load_or_initialize_operational_watch_payload(
-            WATCH_STATE_PATH,
+            _runtime_path(args, 'WATCH_STATE_PATH'),
             expected,
             base_dir=_runtime_watch_base_dir(args),
         )
@@ -2540,7 +2596,7 @@ def _load_runtime_watch_state(args: argparse.Namespace):
     try:
         return WatchState.model_validate(payload)
     except Exception as exc:
-        raise SystemExit(f"watch state has an invalid shape: {WATCH_STATE_PATH}") from exc
+        raise SystemExit(f"watch state has an invalid shape: {_runtime_path(args, 'WATCH_STATE_PATH')}") from exc
 
 
 def _stamp_runtime_watch_state(args: argparse.Namespace, state):
@@ -2717,6 +2773,7 @@ def _owner_monitoring_failure_diagnostics(
 def _persist_one_shot_monitoring_failure(
     result: ScannerRunResult, *,
     exc: BaseException | None = None, prior_errors: Sequence[Any] = (),
+    manifest_path: Path | None = None,
 ) -> None:
     """Write diagnostic evidence before failing closed; never enter delivery."""
     report = dict(result.scanner_process_summary.get("owner_monitoring") or {})
@@ -2735,13 +2792,16 @@ def _persist_one_shot_monitoring_failure(
         "owner_monitoring": report,
         "errors": list(errors),
     }
-    _append_monitoring_failure_diagnostic(row)
+    _append_monitoring_failure_diagnostic(row, manifest_path=manifest_path)
 
 
-def _append_monitoring_failure_diagnostic(row: Mapping[str, Any]) -> None:
+def _append_monitoring_failure_diagnostic(
+    row: Mapping[str, Any], *, manifest_path: Path | None = None,
+) -> None:
+    manifest_path = manifest_path if manifest_path is not None else SCAN_RUN_MANIFEST_PATH
     try:
-        SCAN_RUN_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with SCAN_RUN_MANIFEST_PATH.open("a", encoding="utf-8") as handle:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
     except OSError as persistence_error:
         lines = (*row.get("errors", ()), _watch_phase_error("owner_monitoring_diagnostic_persistence", persistence_error))
@@ -2838,7 +2898,7 @@ async def _surface_monitoring_during_discovery_failure(
             "phase_statuses": {"discovery": "FAILED", "owner_monitoring": "PARTIAL" if lines else "SUCCESS"},
             "owner_monitoring": discovery.owner_monitoring_diagnostics,
             "errors": [_watch_phase_error("discovery", discovery), *lines],
-        })
+        }, manifest_path=_runtime_path(args, "SCAN_RUN_MANIFEST_PATH"))
     if monitor_exc is not None:
         setattr(discovery, "owner_monitoring_error", monitor_exc)
     if not lines:
@@ -3030,7 +3090,10 @@ def _retain_telegram_provenance(
     }})
 
 
-def _persist_one_shot_telegram_failure(result: ScannerRunResult, exc: Exception | SystemExit) -> None:
+def _persist_one_shot_telegram_failure(
+    result: ScannerRunResult, exc: Exception | SystemExit, *, manifest_path: Path | None = None,
+) -> None:
+    manifest_path = manifest_path if manifest_path is not None else SCAN_RUN_MANIFEST_PATH
     row = {
         "record_kind": "telegram_provenance_failure_diagnostic",
         "scan_completion_record": False,
@@ -3042,8 +3105,8 @@ def _persist_one_shot_telegram_failure(result: ScannerRunResult, exc: Exception 
         "errors": [_watch_phase_error("telegram_outbox", exc)],
     }
     try:
-        SCAN_RUN_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with SCAN_RUN_MANIFEST_PATH.open("a", encoding="utf-8") as handle:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
     except OSError as persistence_error:
         raise SystemExit("\n".join((*row["errors"], _watch_phase_error(
@@ -3633,7 +3696,7 @@ async def _run_watch_mode(
         try:
             state = seed_watch_state_from_run_payload(
                 state,
-                load_run_payload(LATEST_RUN_PATH),
+                load_run_payload(_runtime_path(args, 'LATEST_RUN_PATH')),
                 watchlist.symbols,
             )
         except WatchModeError as exc:
@@ -3842,7 +3905,7 @@ async def _run_watch_mode(
                     disk_worker,
                     "watch_state_persistence",
                     save_watch_state,
-                    WATCH_STATE_PATH,
+                    _runtime_path(args, 'WATCH_STATE_PATH'),
                     state,
                     expected_updated_at=previous_state.updated_at,
                     epoch_guard=lambda state=state, expected_epoch=expected_epoch: (
@@ -4003,8 +4066,8 @@ async def _run_watch_mode(
                     execution.result,
                     watchlist=iteration_watchlist,
                     ranked_results=execution.ranked_results,
-                    manifest_path=SCAN_RUN_MANIFEST_PATH,
-                    nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
+                    manifest_path=_runtime_path(args, 'SCAN_RUN_MANIFEST_PATH'),
+                    nightly_history_path=_runtime_path(args, 'NIGHTLY_SCAN_HISTORY_PATH'),
                     run_id=stored_manifest_run_id,
                     output_scan_path=args.output_json,
                     latest_scan_path=args.save_run,
@@ -4081,6 +4144,7 @@ async def _run_watch_mode(
                 console_presenter=console,
                 database_path=args.database_path,
                 expected_identity=getattr(args, "runtime_identity", None),
+                drafts_dir=_runtime_path(args, "ADMIN_DRAFTS_DIR"),
             )
             iteration_status = _iteration_status_from_phases(phase_statuses)
             failure_streak, selected_backoff, retry_policy = _watch_retry_policy(
@@ -4460,11 +4524,11 @@ def _record_failed_watch_iteration(
         "watch_supervisor": summary.model_dump(mode="json"),
     }
     try:
-        SCAN_RUN_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with SCAN_RUN_MANIFEST_PATH.open("a", encoding="utf-8") as handle:
+        _runtime_path(args, 'SCAN_RUN_MANIFEST_PATH').parent.mkdir(parents=True, exist_ok=True)
+        with _runtime_path(args, 'SCAN_RUN_MANIFEST_PATH').open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False))
             handle.write("\n")
-        _write_nightly_scan_history(NIGHTLY_SCAN_HISTORY_PATH, row)
+        _write_nightly_scan_history(_runtime_path(args, 'NIGHTLY_SCAN_HISTORY_PATH'), row)
     except OSError as exc:
         print(f"Warning: failed iteration manifest persistence failed safely: {type(exc).__name__}: {exc}")
 
@@ -5376,7 +5440,7 @@ def _update_continue_watch_state(args: argparse.Namespace, result: ScannerRunRes
 
     try:
         save_watch_state(
-            WATCH_STATE_PATH, _stamp_runtime_watch_state(args, updated_state)
+            _runtime_path(args, 'WATCH_STATE_PATH'), _stamp_runtime_watch_state(args, updated_state)
         )
     except WatchModeError as exc:
         raise SystemExit(str(exc)) from exc

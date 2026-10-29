@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.alerts.telegram import DEFAULT_TELEGRAM_TIMEOUT, TELEGRAM_API_BASE_URL  # noqa: E402
 from app.core.config import Settings  # noqa: E402
+from app.runtime.state_paths import RuntimeStatePaths, rebase_state_arguments  # noqa: E402
 from app.data.dtos import NA  # noqa: E402
 from app.storage.database import DEFAULT_DATABASE_PATH  # noqa: E402
 from app.telegram_admin.client import TelegramAdminConfig  # noqa: E402
@@ -53,6 +54,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--register-commands", action="store_true", help="Register the public bot slash commands.")
     parser.add_argument("--manifest-path", type=Path, default=DEFAULT_SCAN_RUN_MANIFEST_PATH)
     parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument("--runtime-state-root", type=Path, help="Isolated state directory; also RUNTIME_STATE_ROOT.")
     parser.add_argument("--state-path", type=Path, default=DEFAULT_ADMIN_COMMAND_STATE_PATH)
     parser.add_argument("--audit-path", type=Path, default=DEFAULT_ADMIN_COMMAND_AUDIT_PATH)
     return parser.parse_args(argv)
@@ -65,7 +67,22 @@ def main(
     transport: TelegramAdminCommandTransport | None = None,
 ) -> int:
     args = parse_args(argv)
-    config = TelegramAdminConfig.from_settings(settings or Settings())
+    settings = settings or Settings()
+    root = args.runtime_state_root if args.runtime_state_root is not None else settings.runtime_state_root
+    if root is not None:
+        try:
+            paths = RuntimeStatePaths.from_root(
+                root, legacy_roots=(PROJECT_ROOT / "scan_runs", Path.cwd() / "scan_runs"),
+            )
+            rebase_state_arguments(args, paths, defaults={
+                "database_path": (DEFAULT_DATABASE_PATH, "candle_craft.db"),
+                "manifest_path": (DEFAULT_SCAN_RUN_MANIFEST_PATH, "scan_run_manifest.jsonl"),
+                "state_path": (DEFAULT_ADMIN_COMMAND_STATE_PATH, "admin_commands/state.json"),
+                "audit_path": (DEFAULT_ADMIN_COMMAND_AUDIT_PATH, "admin_commands/commands.jsonl"),
+            })
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SystemExit(f"Invalid runtime state paths: {exc}") from exc
+    config = TelegramAdminConfig.from_settings(settings)
     command_service = TelegramAdminCommandService(
         project_root=PROJECT_ROOT,
         manifest_path=args.manifest_path,
