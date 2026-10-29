@@ -526,12 +526,12 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - direct_or_aggregate: provider market-cap methodology, then intersection with Binance USDT perpetual metadata
 - venue: rank is global; contract admission is Binance USD-M
 - instrument_type: PERPETUAL, TRADING, quote USDT, underlying COIN
-- contract_id: base+USDT only when exchangeInfo symbol matches
+- contract_id: exchangeInfo symbol, including verified 1000-prefix mappings; the exchange price unit is not rescaled
 - currencies: CoinPaprika market cap is USD methodology. Binance quote volume is USDT turnover. They are not equated.
-- raw_fields: id, symbol, rank, quotes.USD.market_cap
-- native_unit: USD market cap in the provider methodology; rank integer
-- normalized_unit: SymbolUniverse rank map
-- conversion: identity is provider id plus symbol. Ambiguous symbols are excluded. Rank greater than N is excluded and not refilled.
+- raw_fields: id, symbol, rank, last_updated, quotes.USD.market_cap
+- native_unit: USD market cap in the provider methodology; raw rank integer
+- normalized_unit: SymbolUniverse raw rank map plus qualified_rank diagnostics
+- conversion: qualified_rank after non-genuine exclusions. Ambiguous tickers without a verified provider id are excluded. Qualified rank above the cohort is not refilled.
 - timestamps: provider payload does not become a candle time. generated_at is acquisition time.
 - refresh: each universe resolution; no rank cache on the strict path (cache_used false)
 - history: latest ranking payload
@@ -546,9 +546,9 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/universe/symbol_universe.py:539` contains `"/tickers"`
-  - `app/universe/symbol_universe.py:461` contains `provider_asset.rank > universe_size`
-  - `app/universe/symbol_universe.py:711` contains `STABLECOIN_BASES`
+  - `app/universe/symbol_universe.py:564` contains `"/tickers"`
+  - `app/universe/symbol_universe.py:512` contains `qualified_rank_above_cohort`
+  - `app/universe/symbol_universe.py:736` contains `STABLECOIN_BASES`
 
 ## macro_calendar
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,9 @@ def _asset(base_symbol: str, rank: int) -> dict[str, object]:
     return {
         "id": f"{base_symbol.lower()}-{rank}",
         "symbol": base_symbol,
+        "name": base_symbol,
         "rank": rank,
+        "last_updated": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "quotes": {"USD": {"market_cap": str(1_000_000 - rank)}},
     }
 
