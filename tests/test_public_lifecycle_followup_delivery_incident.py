@@ -77,8 +77,8 @@ def _confirmed_symbol(signal_id: str):
     strategy_diagnostics = {
         mode: {
             **diagnostics,
-            "rr_to_tp2": Decimal("4"),
-            "planned_rr": Decimal("4"),
+            "rr_to_tp2": Decimal("3"),
+            "planned_rr": Decimal("3"),
             "opportunity_score": Decimal("95"),
         }
         for mode, diagnostics in symbol.strategy_diagnostics.items()
@@ -90,7 +90,7 @@ def _confirmed_symbol(signal_id: str):
             "last_seen_at": first_close,
             "last_transition_at": first_close,
             "confirmed_at": first_close,
-            "rr": "4",
+            "rr": "3",
             "quality_grade_current": "A",
             "confirmation_count": 3,
             "required_confirmation_cycles": 2,
@@ -101,7 +101,7 @@ def _confirmed_symbol(signal_id: str):
         update={
             "strategy_diagnostics": strategy_diagnostics,
             "trade_idea": _trade_idea(
-                best_rr=Decimal("4"),
+                best_rr=Decimal("3"),
                 opportunity_score=Decimal("95"),
             ),
             "lifecycle_state": record,
@@ -235,14 +235,14 @@ def test_idle_scans_after_public_confirmation_keep_the_full_followup_chain(
     assert summary.sent == 1
 
     # --- Stage 5: TP2.
-    candles.append(_candle(6, high="115", low="110"))
+    candles.append(_candle(6, high="124", low="110"))
     tp2 = _evaluate(db_path, lifecycle_id, candles)
     assert tp2.progress.tp2_at == _decision(6).isoformat()
     summary, sender = _deliver(db_path, _current_result(confirmed, tp2), scan_run_id="tp2")
     assert summary.sent == 1
 
     # --- Stage 6: TP3.
-    candles.append(_candle(7, high="120", low="115"))
+    candles.append(_candle(7, high="131", low="124"))
     tp3 = _evaluate(db_path, lifecycle_id, candles)
     assert tp3.progress.tp3_at == _decision(7).isoformat()
     assert tp3.progress.terminal_outcome == SetupLifecycleState.TP_HIT.value

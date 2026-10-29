@@ -1880,6 +1880,9 @@ def _rejected_setup(
         selective_fib=SelectiveFibEvidence(strategy_version=version, rejection_reasons=(code,)))
     return LiquidityGrabSetup(
         mode=mode,
+        bias=("long" if structure_shift.direction == "bullish" else "short")
+            if (version == SELECTIVE_VERSION and code in {"entry_zone_not_touched", "entry_confirmation_missing"}
+                and structure_shift is not None and structure_shift.is_present) else NA,
         timeframe=timeframe,
         current_price=current_price,
         sweep=sweep or LiquiditySweepSignal(),

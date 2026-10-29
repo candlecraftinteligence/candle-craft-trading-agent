@@ -348,7 +348,7 @@ def test_process_hit_retains_upstream_file_reload_does_not(tmp_path: Path) -> No
         hit = await first.get_klines_with_delivery("BTCUSDT", "15m", 2, capture_clock=capture)
         encoded = json.loads(cache_path.read_text(encoding="utf-8"))
         second_client = await _binance(httpx.MockTransport(_interval_handler()))
-        restarted = MarketDataCache(file_path=cache_path, now=CacheClock(1_001.0), ttl_seconds=60)
+        restarted = MarketDataCache(file_path=cache_path, now=CacheClock(1_000.5), ttl_seconds=60)
         second = CachedMarketDataClient(second_client, restarted)
         capture.advance(1)
         reloaded = await second.get_klines_with_delivery("BTCUSDT", "15m", 2, capture_clock=capture)
@@ -420,15 +420,18 @@ def test_two_symbols_interleaved_mixed_cache_paths() -> None:
     assert EVIDENCE_NORMAL_PRODUCER
 
 
-def test_concurrent_same_key_reversed_completion_keeps_per_caller_evidence() -> None:
+@pytest.mark.parametrize("enabled", [True, False])
+def test_concurrent_same_key_keeps_per_caller_evidence_and_shared_acquisition(enabled) -> None:
     class Gated:
         exchange_name = "fixture"
 
         def __init__(self) -> None:
             self.release_first = asyncio.Event()
             self.second_started = asyncio.Event()
+            self.calls = 0
 
         async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Any]]:
+            self.calls += 1
             if not self.second_started.is_set():
                 self.second_started.set()
                 await self.release_first.wait()
@@ -439,20 +442,28 @@ def test_concurrent_same_key_reversed_completion_keeps_per_caller_evidence() -> 
 
     async def scenario() -> None:
         client = Gated()
-        cache = MarketDataCache(now=CacheClock(1_000.0), ttl_seconds=60)
+        cache = MarketDataCache(enabled=enabled, now=CacheClock(1_000.0), ttl_seconds=60)
         wrapped = CachedMarketDataClient(client, cache)
         clock = ControllableDatetimeClock(datetime(2026, 1, 8, tzinfo=UTC))
         first_task = asyncio.create_task(wrapped.get_klines_with_delivery("AAAUSDT", "1m", 1, capture_clock=clock))
-        await client.second_started.wait()
-        second = await wrapped.get_klines_with_delivery("AAAUSDT", "1m", 1, capture_clock=clock)
+        await asyncio.wait_for(client.second_started.wait(), 1)
+        second_task = asyncio.create_task(wrapped.get_klines_with_delivery("AAAUSDT", "1m", 1, capture_clock=clock))
+        await asyncio.sleep(0)
+        if enabled:
+            assert client.calls == 1 and not second_task.done()
+        else:
+            second = await asyncio.wait_for(second_task, 1)
+            assert second.snapshot.records[0].values["close"] == Decimal("9")
         client.release_first.set()
-        first = await first_task
+        first, second = await asyncio.wait_for(asyncio.gather(first_task, second_task), 1)
         later = await wrapped.get_klines_with_delivery("AAAUSDT", "1m", 1, capture_clock=clock)
         assert first.snapshot.records[0].values["close"] == Decimal("1")
-        assert second.snapshot.records[0].values["close"] == Decimal("9")
+        assert second.snapshot.records[0].values["close"] == Decimal("1" if enabled else "9")
         assert first.occurrence_token != second.occurrence_token
-        assert later.snapshot.records[0].values["close"] == Decimal("1")
-        assert later.cache is not None and later.cache.delivery_kind == CACHE_KIND_HIT
+        assert later.snapshot.records[0].values["close"] == Decimal("1" if enabled else "9")
+        assert later.cache is not None
+        assert later.cache.delivery_kind == (CACHE_KIND_HIT if enabled else CACHE_KIND_NOT_APPLICABLE)
+        assert client.calls == (1 if enabled else 3)
 
     run(scenario())
     assert EVIDENCE_NORMAL_PRODUCER

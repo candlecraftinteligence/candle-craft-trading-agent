@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
+from app.core.trade_plan_integrity import TradePlanIntegrityResult, validate_public_trade_plan
 
 OUTPUT_QUANT = Decimal("0.00000001")
 DEFAULT_REQUIRED_RR = Decimal("2.5")
@@ -72,6 +73,7 @@ class RRProjection(BaseModel):
 
 
 class TargetIntelligenceInput(BaseModel):
+    economic_plan: TradePlanIntegrityResult | None = None
     symbol: str = NA
     mode: str = NA
     direction: str = NA
@@ -209,6 +211,8 @@ def build_target_intelligence(
             payload.update(dict(input_data))
     payload.update(overrides)
     data = TargetIntelligenceInput.model_validate(payload)
+    if data.economic_plan is not None:
+        return _canonical_plan_assessment(data)
 
     direction = _normalize_direction(data.direction)
     if direction == NA or data.entry == NA or data.stop == NA:
@@ -295,6 +299,36 @@ def build_target_intelligence(
         rr_projections=projections,
         warnings=_warnings(data, *candle_warnings, *htf_warnings, *_failure_warnings(failure_type)),
     )
+
+
+def _canonical_plan_assessment(data: TargetIntelligenceInput) -> TargetIntelligenceResult:
+    """Assess the final plan, never invent a second TP2 from nearby proxies.
+
+    Structural target selection already chose the nearest unswept opposing
+    levels. Shorter intermediate reactions remain visible through TP1 and chop
+    caution; they do not replace TP2 in the economic decision.
+    """
+    plan = data.economic_plan
+    checked = validate_public_trade_plan(direction=plan.direction,entry_low=plan.entry_low,
+        entry_high=plan.entry_high,stop_loss=plan.stop_loss,tp1=plan.tp1,tp2=plan.tp2,tp3=plan.tp3,
+        minimum_rr=data.minimum_rr,execution_cost=plan.execution_cost)
+    if not checked.valid:
+        return _result(data=data,failure_type=TargetFailureType.RR_BELOW_MINIMUM,
+            rr_compression_reason=f"Final economic plan failed: {checked.reason}")
+    targets = tuple(LiquidityTarget(price=price,source="canonical_structural_liquidity",
+        target_type=f"TP{index}",distance=abs(price-checked.entry_reference),
+        rr=(abs(price-checked.entry_reference)-checked.execution_cost)/checked.risk_distance,
+        notes="Final structural plan; no independently selected target.")
+        for index,price in enumerate((checked.tp1,checked.tp2,checked.tp3),1))
+    caution = _target_inside_chop(data,checked.direction,checked.entry_reference,targets[1])
+    return TargetIntelligenceResult(tp1_candidate=checked.tp1,tp2_candidate=checked.tp2,tp3_candidate=checked.tp3,
+        nearest_opposing_liquidity=checked.tp1,target_distance=targets[1].distance,clean_path_distance=targets[0].distance,
+        rr_to_tp1=targets[0].rr,rr_to_tp2=checked.rr,rr_to_tp3=targets[2].rr,
+        target_quality_grade=TargetQualityGrade.REJECT if caution else TargetQualityGrade.B,
+        target_failure_type=TargetFailureType.TARGET_INSIDE_CHOP if caution else NA,
+        rr_compression_reason="TP2 remains inside recent chop/range." if caution else NA,
+        next_target_condition="Watch TP1 reaction; TP2 path remains inside chop." if caution else "Maintain the final structural plan and its invalidation.",
+        liquidity_targets=targets,rr_projections=_rr_projections(targets,max(Decimal("3"),data.minimum_rr)))
 
 
 def _target_zones(

@@ -32,7 +32,7 @@ def _idea(**overrides: object) -> TradeIdeaResult:
         "entry_low": Decimal("100"),
         "entry_high": Decimal("102"),
         "stop_loss": Decimal("95"),
-        "take_profit_targets": (Decimal("112"), Decimal("120")),
+        "take_profit_targets": (Decimal("112"), Decimal("124.4"), Decimal("130")),
         "invalidation": "Invalid below 95.",
         "opportunity_score": Decimal("88"),
         "opportunity_grade": "A",

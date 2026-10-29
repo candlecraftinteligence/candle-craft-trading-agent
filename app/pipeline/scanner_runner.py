@@ -143,13 +143,14 @@ from app.analytics.selective_fibonacci import LEGACY_VERSION, SELECTIVE_VERSION,
 from app.data.instrument_precision import InstrumentPrecision
 from app.core.rejection_category import rejection_category
 from app.analytics.derivatives_context import assess_native_context, admitted_strategy_values, observed_stream_context, observed_spread
+from app.core.confirmed_data_health import classify_confirmed_data_health
 from app.strategies.selective_timeframes import HIERARCHY
 from app.core.minimum_rr import (
     DEFAULT_CONFIGURED_MINIMUM_RR,
     hard_mode_minimum_rr,
     validate_configured_minimum_rr,
 )
-from app.core.trade_plan_integrity import TradePlanIntegrityResult, validate_trade_plan
+from app.core.trade_plan_integrity import TradePlanIntegrityResult, validate_trade_plan, validate_public_trade_plan
 from app.lifecycle.models import (
     SetupLifecycleOutcomeProgress,
     SetupLifecycleRecord,
@@ -1771,7 +1772,8 @@ class ScannerRunner:
                 strategy_execution=strategy_execution,
             )
 
-        data_quality_score = _data_quality_score(technical, derivatives, base_missing)
+        data_quality_score = _data_quality_score(technical, derivatives, base_missing,
+            structural_policy=config.strategy_version == SELECTIVE_VERSION, unverified_data=base_unverified)
         risk_decision = self.risk_manager.analyze(
             RiskManagerInput(
                 account_equity=config.account_equity,
@@ -1897,6 +1899,8 @@ class ScannerRunner:
                 "opportunity_decision": score_result.decision,
                 "risk_approved": risk_decision.approved,
                 "best_rr": qualification_rr,
+                "execution_cost": (strategy_execution.selected_setup.pullback_zone.execution_cost
+                                   if strategy_execution.selected_setup is not None else Decimal("0")),
                 "technical_summary": candidate.technical_summary,
                 "derivatives_summary": _derivatives_enrichment_summary(derivatives_enrichment),
                 "confirmed_facts": candidate.confirmed_facts,
@@ -2969,9 +2973,11 @@ class ScannerRunner:
         return ScannerSymbolResult(
             cmc_native_evidence=optional_data.cmc_native_evidence,
             derivatives_supporting_context=supporting_context,
-            rejection_category=(NA if trade_idea is not None else strategy_execution.strategy_diagnostics.get(
-                "rejection_category", _representative_strategy_diagnostics(strategy_execution).get(
-                "rejection_category", rejection_category(rejection_reason or status.value)))),
+            rejection_category=(NA if trade_idea is not None else _first_non_na(
+                strategy_execution.strategy_diagnostics.get("rejection_category"),
+                _representative_strategy_diagnostics(strategy_execution).get("rejection_category"),
+                rejection_category(rejection_stage_override or _strategy_failed_gate(
+                    _representative_strategy_diagnostics(strategy_execution))))),
             symbol=symbol,
             status=status,
             status_history=status_history,
@@ -4391,6 +4397,10 @@ def _target_intelligence_for_setup(
     mode = setup.mode.value
     required_rr = setup.effective_minimum_rr
     return build_target_intelligence(
+        economic_plan=(validate_public_trade_plan(direction=setup.bias,entry_low=setup.entry_low,
+            entry_high=setup.entry_high,stop_loss=setup.stop,tp1=setup.tp1,tp2=setup.tp2,tp3=setup.tp3,
+            minimum_rr=required_rr,execution_cost=setup.pullback_zone.execution_cost)
+            if setup.strategy_version == SELECTIVE_VERSION else None),
         symbol=setup.pullback_zone.symbol if hasattr(setup.pullback_zone, "symbol") else diagnostics.get("symbol", NA),
         mode=mode,
         direction=_first_non_na(setup.bias, diagnostics.get("bias")),
@@ -4850,10 +4860,19 @@ def _data_quality_score(
     technical: TechnicalStructureResult,
     derivatives: DerivativesOrderflowResult,
     missing_data: Sequence[str],
+    *, structural_policy: bool = False, unverified_data: Sequence[str] = (),
 ) -> Decimal:
     score = Decimal("100")
     if not technical.is_valid:
         score -= Decimal("50")
+    if structural_policy:
+        # The prospective strategy requires closed, fresh MTF candles and verified
+        # precision before reaching this point. Use the canonical required/optional
+        # classification, not duplicate penalties for absent optional derivatives.
+        health = classify_confirmed_data_health(missing_values=(missing_data,), unverified_values=(unverified_data,))
+        if health.blocked:
+            score -= Decimal("50")
+        return _quantize(max(score, Decimal("0")))
     if derivatives.data_quality.status == "invalid":
         score -= Decimal("50")
     elif derivatives.data_quality.status == "partial":

@@ -1294,7 +1294,7 @@ def test_coalesced_triggered_never_becomes_a_recovery_send(tmp_path) -> None:
     assert recovered.deliveries[0].alert_type == TelegramAlertType.LIMIT_HIT.value
     assert repeated.sent == 0
     assert len(sender.messages) == 2
-    assert "ZONE ENGAGED" in sender.messages[-1]
+    assert "ENTRY ZONE TOUCHED" in sender.messages[-1]
     assert all("SETUP TRIGGERED" not in message for message in sender.messages)
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         final_states = repository._connection.execute(

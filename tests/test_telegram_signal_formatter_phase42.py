@@ -95,7 +95,7 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
     assert text.startswith("🐺 BTCUSDT · LONG · SCALP")
     assert "🟢 SIGNAL CONFIRMED" in text
     assert "🟡 TP1 PRIORITY" not in text
-    assert "A · Score N/A · 2.92R" in text
+    assert "A · Score N/A · TP2 RR 2.92R" in text
     assert "Confirmation criteria satisfied." not in text
     assert "🎯 ENTRY 100 – 102" in text
     assert "🛡 SL 95" in text
@@ -105,8 +105,8 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
     assert "🧠 EDGE" in text
     assert "Sweep ✓ · CHoCH ✓ · OB ✓ · FVG ✓ · Fib ✓" in text
     assert "⚔️ EXECUTION" in text
-    assert "Wait for the mapped zone. No chase." in text
-    assert "🐺 Hunt live." in text
+    assert "Wait for the mapped zone; reassess if structure changes. No chase." in text
+    assert "Price contact is observed; your entry and exchange fill are Unverified." in text
     assert text.count("Risk warning: Not financial advice. Trading can result in losses.") == 1
     assert text.index("Risk warning:") < text.index("CCI · Signal. Structure. Execution.")
     assert "Actionability" + ":" not in text
@@ -131,7 +131,7 @@ def test_public_watchlist_formatter_matches_compact_watch_shape() -> None:
 
     assert text.startswith("🐺 BTCUSDT · LONG · SCALP")
     assert "👁 ON THE RADAR — CONFIRMATION REQUIRED" in text
-    assert "A · Score N/A · RR 2.92R" in text
+    assert "A · Score N/A · TP2 RR 2.92R" in text
     assert "🎯 TRADE MAP" in text
     assert "Entry: 100 – 102" in text
     assert "SL: 95" in text
@@ -140,7 +140,7 @@ def test_public_watchlist_formatter_matches_compact_watch_shape() -> None:
     assert "TP3: 120" in text
     assert "⚔️ EXECUTION" in text
     assert "Wait for confirmation.\nNo entry until structure accepts back through the trigger zone." in text
-    assert "Invalid if price body-closes and accepts below 95." in text
+    assert "Invalidation: hard stop on price contact at or below 95." in text
     assert "🐺 On the radar. Patience protects the edge." in text
     assert "Candle Craft | Signal. Structure. Execution." in text
     assert "Actionability" + ":" not in text
@@ -164,8 +164,8 @@ def test_confirmed_target_caution_does_not_expand_the_compact_card() -> None:
     )
 
     assert "🟢 SIGNAL CONFIRMED" in text
-    assert "\n\n🟡 TP1 PRIORITY\n\nA · Score N/A · 2.92R" in text
-    assert "Wait for the mapped zone. No chase." in text
+    assert "\n\n🟡 TP1 PRIORITY\n\nA · Score N/A · TP2 RR 2.92R" in text
+    assert "Wait for the mapped zone; reassess if structure changes. No chase." in text
     assert "TP1 reaction matters because TP2/TP3 path is choppy." not in text
     assert "Actionability" + ":" not in text
     assert "TARGET " + "CAUTION" not in text
@@ -222,7 +222,7 @@ def test_short_liquidity_rejection_signal_tracks_rejection_and_invalidates_above
     assert "Sweep ✓ · CHoCH ✓" in text
     assert "🛡 SL 105" in text
     assert "wick to 105.5" not in text
-    assert "🐺 Hunt live." in text
+    assert "Price contact is observed; your entry and exchange fill are Unverified." in text
 
 
 def test_public_signal_missing_liquidity_uses_safe_wolf_fallback() -> None:
@@ -238,7 +238,7 @@ def test_public_signal_missing_liquidity_uses_safe_wolf_fallback() -> None:
     assert "Wolf found downside liquidity" not in text
     assert "Wolf found upside liquidity" not in text
     assert "🧠 EDGE" not in text
-    assert "🐺 Hunt live." in text
+    assert "Price contact is observed; your entry and exchange fill are Unverified." in text
 
 
 def test_public_watchlist_formatter_uses_short_bias_and_stop() -> None:
@@ -254,7 +254,7 @@ def test_public_watchlist_formatter_uses_short_bias_and_stop() -> None:
 
     assert "BTCUSDT · SHORT · SCALP" in text
     assert "SL: 105" in text
-    assert "Invalid if price body-closes and accepts above 105." in text
+    assert "Invalidation: hard stop on price contact at or above 105." in text
     assert "Limit Zone must hold as resistance" not in text
     assert "Bearish structure must remain valid" not in text
     assert "Invalid below/above" not in text
@@ -297,7 +297,7 @@ def test_watchlist_upgraded_requires_upgrade_flag() -> None:
 def test_limit_zone_hit_renders_hunting_zone_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.LIMIT_HIT, _message())
 
-    assert text.startswith("🎯 BTCUSDT · ZONE ENGAGED")
+    assert text.startswith("🎯 BTCUSDT · ENTRY ZONE TOUCHED")
     assert "Price has reached the mapped territory." in text
     assert "⚔️ REACTION REQUIRED" in text
     assert "Entry 100 – 102" in text
@@ -315,7 +315,7 @@ def test_limit_zone_hit_renders_hunting_zone_language() -> None:
 def test_tp1_renders_partial_win_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.TP1_HIT, _message())
 
-    assert text.startswith("✅ BTCUSDT · TP1 SECURED")
+    assert text.startswith("✅ BTCUSDT · TP1 REACHED")
     assert "First objective reached." in text
     assert "\n\n110\n\n" in text
     assert "Next → TP2 115" in text
@@ -325,7 +325,7 @@ def test_tp1_renders_partial_win_language() -> None:
 def test_tp2_renders_strong_follow_through_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.TP2_HIT, _message())
 
-    assert text.startswith("🔥 BTCUSDT · TP2 SECURED")
+    assert text.startswith("🔥 BTCUSDT · TP2 REACHED")
     assert "Second objective reached." in text
     assert "\n\n115\n\n" in text
     assert "Final → TP3 120" in text
@@ -338,7 +338,7 @@ def test_tp2_omits_rr_when_stored_context_does_not_provide_it() -> None:
         _message(planned_rr=NA, signal_context=None),
     )
 
-    assert "🔥 BTCUSDT · TP2 SECURED" in text
+    assert "🔥 BTCUSDT · TP2 REACHED" in text
     assert "RR to TP2:" not in text
 
 
@@ -436,7 +436,7 @@ def test_missing_evidence_omits_intelligence_without_inventing_technical_claims(
     assert "🧠 EDGE" not in text
     for unsupported in ("liquidity swept", "CHoCH", "order block", "OB/FVG", "Fib alignment"):
         assert unsupported not in text
-    assert "🐺 Hunt live." in text
+    assert "Price contact is observed; your entry and exchange fill are Unverified." in text
 
 
 def test_missing_invalidation_uses_directional_stop_fallback() -> None:
@@ -445,7 +445,7 @@ def test_missing_invalidation_uses_directional_stop_fallback() -> None:
         _message(invalidation_reason=NA),
     )
 
-    assert "Invalid if price body-closes and accepts below 95." in text
+    assert "Invalidation: hard stop on price contact at or below 95." in text
 
 
 def test_swing_signal_labels_swing_setup() -> None:
@@ -485,7 +485,7 @@ def test_combined_source_modes_need_valid_confluence_flag() -> None:
 def test_a_plus_grade_and_score_are_shown() -> None:
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message(quality="A+", quality_score=96))
 
-    assert "A+ · Score 96 · RR 2.92R" in text
+    assert "A+ · Score 96 · TP2 RR 2.92R" in text
 
 
 def test_long_and_short_invalidation_are_direction_aware() -> None:
@@ -495,8 +495,8 @@ def test_long_and_short_invalidation_are_direction_aware() -> None:
         _message(direction="short", stop_loss=Decimal("105"), invalidation_reason=NA),
     )
 
-    assert "Invalid if price body-closes and accepts below 95." in long_text
-    assert "Invalid if price body-closes and accepts above 105." in short_text
+    assert "Invalidation: hard stop on price contact at or below 95." in long_text
+    assert "Invalidation: hard stop on price contact at or above 105." in short_text
 
 
 def test_missing_invalidation_level_does_not_invent_number() -> None:
@@ -686,7 +686,7 @@ def test_all_required_stored_levels_survive_confirmed_formatting() -> None:
         "TP1 0.214",
         "TP2 0.21089",
         "TP3 0.2089",
-        "· 3.07R",
+        "· TP2 RR 3.07R",
     ):
         assert expected in text
 
@@ -712,11 +712,11 @@ def test_rejected_no_setup_output_is_not_converted_to_valid_signal() -> None:
 
 
 def test_price_display_formats_clean_public_values() -> None:
-    assert format_telegram_price(Decimal("73.252056")) == "73.25"
-    assert format_telegram_price(Decimal("109.99894")) == "110"
-    assert format_telegram_price(Decimal("0.0457434")) == "0.04574"
-    assert format_telegram_price(Decimal("0.16737736")) == "0.16738"
-    assert format_telegram_price(Decimal("70000.123456")) == "70000.12"
+    assert format_telegram_price(Decimal("73.252056")) == "73.252056"
+    assert format_telegram_price(Decimal("109.99894")) == "109.99894"
+    assert format_telegram_price(Decimal("0.0457434")) == "0.0457434"
+    assert format_telegram_price(Decimal("0.16737736")) == "0.16737736"
+    assert format_telegram_price(Decimal("70000.123456")) == "70000.123456"
     assert "E" not in format_telegram_price(Decimal("0.000000123456")).upper()
     assert format_telegram_price(NA) == NA
     assert format_telegram_price({"price": "73.25"}) == NA

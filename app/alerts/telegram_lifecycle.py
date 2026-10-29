@@ -15145,6 +15145,19 @@ def _derivatives_confluence_text(symbol_result: ScannerSymbolResult, diagnostics
 
 
 def _derivatives_status(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    context = symbol_result.derivatives_supporting_context
+    if context is not None:
+        metrics = context.get("metrics", {})
+        parts = []
+        for key, label in (("funding_rate", "Funding"), ("oi_change_pct", "OI change"), ("account_ratio", "Account ratio")):
+            metric = metrics.get(key, {})
+            status = metric.get("status", "MISSING")
+            if status == "VERIFIED":
+                unit = "%" if key == "oi_change_pct" else " (rate)" if key == "funding_rate" else ""
+                parts.append(f"{label} {metric['value']}{unit}")
+            else:
+                parts.append(f"{label} N/A ({status.title()})")
+        return "; ".join(parts) + f". Optional observations as of {context.get('observed_at', NA)}; not entry confirmation."
     parts = [
         _first_non_na(diagnostics.get("funding_context"), symbol_result.funding_status),
         _first_non_na(diagnostics.get("oi_context"), symbol_result.oi_direction),

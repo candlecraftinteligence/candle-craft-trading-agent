@@ -1119,6 +1119,7 @@ def test_r27_owned_fresh_path_can_claim_outbox_and_fake_send(tmp_path: Path) -> 
 
     with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         record = _owned(_outcome_record(lifecycle_id="fresh-progress", mode="swing"))
+        record = record.model_copy(update={"tp2":"138","tp3":"150","rr":"3"})
         repository.upsert_record(record)
         candles = [_outcome_baseline("long")]
         primed = _evaluate_outcomes(repository, record, candles)
@@ -1149,6 +1150,12 @@ def test_r27_owned_fresh_path_can_claim_outbox_and_fake_send(tmp_path: Path) -> 
             "lifecycle_outcome_progress": outcome.progress,
         }
     )
+    from tests.test_liquidity_grab_pullback import _full_bullish_setup_candles
+    from app.strategies.liquidity_grab_pullback import detect_structure_shift
+    shift = detect_structure_shift(_full_bullish_setup_candles(), direction="bullish")
+    assert shift.is_present  # separate closed-structure proof, never inferred from entry contact
+    batch = batch.model_copy(update={"strategy_diagnostics": {"swing": {
+        "confirmation_structure_shift_status": "passed" if shift.is_present else "failed"}}})
     sender = FakeSender()
     summary = run(
         TelegramLifecycleDeliveryService(

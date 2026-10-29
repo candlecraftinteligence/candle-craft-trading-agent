@@ -394,8 +394,14 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
             fib_alignment=fib_alignment,
         )
 
+    pending_entry_reasons = ()
     if data.strategy_version == SELECTIVE_VERSION:
-        if not evidence.execution_eligible:
+        if (not evidence.execution_eligible and selected is not None and evidence.rejection_reasons
+                and set(evidence.rejection_reasons) <= {"entry_zone_not_touched", "entry_confirmation_missing"}):
+            # Compute the same protected conditional plan for internal WATCH.
+            # Entry evidence remains failed; no execution eligibility is added.
+            pending_entry_reasons = evidence.rejection_reasons
+        elif not evidence.execution_eligible:
             return _failed_result(data, evidence.rejection_reasons[0], "; ".join(evidence.rejection_reasons),
                                   **base_update, selected_zone=selected or PullbackZone(),
                                   selected_zone_type=selected.zone_type if selected else NA,
@@ -651,9 +657,11 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         tp2_source=base_update.get("tp2_source", NA),
         execution_cost=execution_cost,
         execution_friction_bps=data.execution_friction_bps if data.strategy_version == SELECTIVE_VERSION else Decimal("0"),
-        valid=True,
+        valid=not pending_entry_reasons,
         direction=data.direction,
-        pullback_zone_status="valid",
+        pullback_zone_status="failed" if pending_entry_reasons else "valid",
+        first_failed_gate=pending_entry_reasons[0] if pending_entry_reasons else NA,
+        pullback_failure_reason="; ".join(pending_entry_reasons) if pending_entry_reasons else NA,
         calculation_timeframe=calculation_timeframe,
         sweep_candle_index=sweep_index,
         bos_choch_candle_index=bos_index,

@@ -130,6 +130,8 @@ INITIAL_PUBLIC_WATCHLIST_PENDING_GATES = frozenset(
         "confirmation_pending",
         "limit_zone_hold_pending",
         "limit_zone_not_touched",
+        "entry_zone_not_touched",
+        "entry_confirmation_missing",
         "missing_confirmation",
         "missing_confirmation_structure_shift",
         "pullback_confirmation_pending",

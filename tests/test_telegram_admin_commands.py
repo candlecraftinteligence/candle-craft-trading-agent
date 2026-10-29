@@ -1325,7 +1325,7 @@ def test_public_active_signals_only_include_confirmed_signal_rows(tmp_path) -> N
         entry_high="102",
         stop_loss="95",
         tp1="112",
-        tp2="120",
+        tp2="123",
         tp3="130",
     )
     _insert_runtime_attempt(db_path, signal_id="sig-watch", symbol="NEARUSDT", alert_type="WATCHLIST", entry_low="90", entry_high="91")

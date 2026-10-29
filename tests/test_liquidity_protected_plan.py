@@ -138,3 +138,22 @@ def test_simulated_contact_cannot_supply_missing_structural_confirmation(tmp_pat
     result = asyncio.run(_service(path, sender).deliver_for_run(_run_result(symbol), scan_run_id="no-confirmation"))
     assert result.sent == 0 and sender.messages == []
     assert any("simulated_contact_not_structural_confirmation" in (item.error_message or "") for item in result.deliveries)
+
+
+def test_target_assessment_uses_final_plan_and_revalidates_claims():
+    from dataclasses import replace
+    from app.analytics.target_intelligence import build_target_intelligence
+    from app.core.trade_plan_integrity import validate_public_trade_plan
+    plan = validate_public_trade_plan(direction="long", entry_low=D("100"), entry_high=D("102"),
+        stop_loss=D("95"),tp1=D("110"),tp2=D("125"),tp3=D("130"),execution_cost=D(".1"))
+    assert plan.valid
+    # An unrelated closer candidate must not replace the actual structural TP2.
+    result = build_target_intelligence(economic_plan=plan,nearest_resistance=D("103"))
+    assert result.tp2_candidate == plan.tp2 and result.rr_to_tp2 == plan.rr
+    assert result.target_failure_type == "N/A"
+    assert result.target_confidence == "N/A"  # no invented confidence score
+    assert result.rr_projections[1].rr == plan.rr
+    bad = replace(plan,tp2=D("115"),rr=D("10"),valid=True)
+    rejected = build_target_intelligence(economic_plan=bad)
+    assert rejected.target_quality_grade.value == "Reject"
+    assert rejected.target_failure_type.value == "RR_BELOW_MINIMUM"

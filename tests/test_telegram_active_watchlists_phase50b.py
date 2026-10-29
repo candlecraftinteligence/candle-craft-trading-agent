@@ -511,8 +511,8 @@ def _insert_planned_watchlist(
             "entry_high": "102",
             "stop": "105",
             "tp1": "95",
-            "tp2": "90",
-            "tp3": "85",
+            "tp2": "85",
+            "tp3": "80",
             "invalidation": "Invalid if price accepts above 105.",
         }
     else:
@@ -521,8 +521,8 @@ def _insert_planned_watchlist(
             "entry_high": "102",
             "stop": "95",
             "tp1": "110",
-            "tp2": "115",
-            "tp3": "120",
+            "tp2": "123",
+            "tp3": "130",
             "invalidation": "Invalid if price accepts below 95.",
         }
     plan = {
@@ -599,8 +599,8 @@ def _insert_active_signal(
             "entry_high": "102",
             "stop_loss": "105",
             "tp1": "95",
-            "tp2": "90",
-            "tp3": "85",
+            "tp2": "84.5",
+            "tp3": "80",
         }
     else:
         defaults = {
@@ -608,8 +608,8 @@ def _insert_active_signal(
             "entry_high": "102",
             "stop_loss": "95",
             "tp1": "110",
-            "tp2": "115",
-            "tp3": "120",
+            "tp2": "123.7",
+            "tp3": "130",
         }
     _insert_attempt(
         db_path,
@@ -754,7 +754,7 @@ def test_active_signals_use_sent_runtime_signal_attempts(tmp_path: Path) -> None
         entry_high="102",
         stop_loss="95",
         tp1="112",
-        tp2="120",
+        tp2="123.7",
         tp3="130",
     )
     _insert_attempt(db_path, signal_id="sig-watch", symbol="WATCHUSDT", alert_type="WATCHLIST", entry_low="1", entry_high="2")
@@ -808,8 +808,8 @@ def test_sent_setup_alert_uses_matching_internal_active_lifecycle_for_signal_vie
             entry_high="102",
             stop_loss="95",
             tp1="110",
-            tp2="115",
-            tp3="120",
+            tp2="123",
+            tp3="130",
             invalidation_reason="Invalid beyond the persisted stop.",
             last_seen_at=lifecycle_at,
             last_transition_at=lifecycle_at,
@@ -936,8 +936,8 @@ def test_active_signals_dedupe_same_symbol_bias_and_hide_expired_duplicate(tmp_p
         entry_high="101",
         stop_loss="95",
         tp1="110",
-        tp2="117",
-        tp3="124",
+        tp2="124.4",
+        tp3="130",
         sent_at=old_sent,
     )
     _insert_lifecycle_record(
@@ -958,8 +958,8 @@ def test_active_signals_dedupe_same_symbol_bias_and_hide_expired_duplicate(tmp_p
         entry_high="102",
         stop_loss="95",
         tp1="110",
-        tp2="117",
-        tp3="124",
+        tp2="124.4",
+        tp3="130",
         sent_at=fresh_sent,
     )
 
@@ -1037,7 +1037,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
         entry_high="42.987654",
         stop_loss="40.75",
         tp1="45.25",
-        tp2="47.5",
+        tp2="49.98",
         tp3="50",
         invalidation_reason="Invalid if price accepts below 40.75.",
         last_seen_at=_fresh_timestamp(),
@@ -1056,7 +1056,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
         entry_high="42.987654",
         stop_loss="40.75",
         tp1="45.25",
-        tp2="47.5",
+        tp2="49.98",
         tp3="50",
     )
     _insert_attempt(
@@ -1072,7 +1072,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
         entry_high="42.987654",
         stop_loss="40.75",
         tp1="45.25",
-        tp2="47.5",
+        tp2="49.98",
         tp3="50",
     )
     _insert_lifecycle_event(
@@ -1094,14 +1094,14 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
     detail = service.public_response_for("/signal CRCLUSDT")
 
     assert detail.text.startswith("🐺🟠 CRCLUSDT — SIGNAL DETAIL")
-    assert "Status: ZONE ENGAGED" in detail.text
+    assert "Status: ENTRY ZONE TOUCHED" in detail.text
     assert "Quality: A" in detail.text
     assert "RR: 3.12R" in detail.text
     assert "Lifecycle: CONFIRMED → LIMIT ZONE HIT" in detail.text
-    assert "Entry Zone: 42.12 – 42.99" in detail.text
+    assert "Entry Zone: 42.123456 – 42.987654" in detail.text
     assert "Stop: 40.75" in detail.text
     assert "TP1: 45.25" in detail.text
-    assert "TP2: 47.5" in detail.text
+    assert "TP2: 49.98" in detail.text
     assert "TP3: 50" in detail.text
     assert "Invalid if price accepts below 40.75." in detail.text
     assert "No active signal detail found." not in detail.text
@@ -1120,7 +1120,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         entry_high="102",
         stop_loss="95",
         tp1="110",
-        tp2="118",
+        tp2="123.84",
         tp3="125",
         invalidation_reason="Price accepts below 95.",
         quality_score=90,
@@ -1135,7 +1135,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         entry="100-102",
         stop="95",
         tp1="110",
-        tp2="118",
+        tp2="123.84",
         tp3="125",
         invalidation="Price accepts below 95.",
         quality_grade="A",
@@ -1159,7 +1159,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         entry_high="102",
         stop_loss="95",
         tp1="110",
-        tp2="118",
+        tp2="123.84",
         tp3="125",
     )
     _insert_lifecycle_event(
@@ -1200,7 +1200,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
     assert "Entry Zone: 100 – 102" in detail.text
     assert "Stop: 95" in detail.text
     assert "TP1: 110" in detail.text
-    assert "TP2: 118" in detail.text
+    assert "TP2: 123.84" in detail.text
     assert "TP3: 125" in detail.text
     assert "Liquidity swept and structure shifted." in detail.text
     assert "Price accepts below 95." in detail.text
@@ -1264,8 +1264,8 @@ def test_signal_detail_callbacks_route_safely_and_legacy_active_signals_callback
         entry_high="11",
         stop_loss="9",
         tp1="12",
-        tp2="13",
-        tp3="14",
+        tp2="17",
+        tp3="18",
     )
     service = _service(tmp_path, db_path)
     transport = FakeCommandTransport()
@@ -1685,7 +1685,7 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
     assert "Active signals: 1" in response.text
     assert _button_labels(response.reply_markup) == ["ENAUSDT"]
     detail = _service(tmp_path, db_path).public_response_for("/signal ENAUSDT")
-    assert "Status: TP1 SECURED" in detail.text
+    assert "Status: TP1 REACHED" in detail.text
     assert f"Updated: {tp1_seen}" in detail.text
     tp3_detail = _service(tmp_path, db_path).public_response_for("/signal TP3USDT")
     assert "No active signal available for this symbol. Setup expired or invalidated." in tp3_detail.text

@@ -1813,8 +1813,8 @@ def test_confirmed_public_quality_and_opportunity_are_conjunctive(
         previous=SetupLifecycleState.TRIGGERED,
         setup_quality=_setup_quality_with_grade(grade, quality_score=quality_score),
         opportunity_score=opportunity_score,
-        diagnostics=_diagnostics(rr_to_tp2=Decimal("4")),
-        trade_idea=_trade_idea(best_rr=Decimal("4")),
+        diagnostics=_diagnostics(rr_to_tp2=Decimal("3")),
+        trade_idea=_trade_idea(best_rr=Decimal("3")),
     )
 
     decision = telegram_alert_decision_for_symbol(
@@ -2024,7 +2024,7 @@ def test_public_signal_context_extracts_specific_diagnostics_for_message() -> No
     assert "Entry 100 – 102 overlaps the selected FVG and the validated fib pullback zone." in text
     assert "The stored plan provides 3.25R to TP2." in text
     assert "clean RR path" not in text
-    assert "Invalid if price" in text and "below 95" in text
+    assert "Invalidation: hard stop on price contact at or below 95." in text
     assert "Setup quality does not provide enough deterministic edge" not in text
 
 

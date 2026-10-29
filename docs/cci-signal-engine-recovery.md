@@ -181,3 +181,59 @@ WebSocket recovery); 112 passed in 33.22 seconds (watch, cache, HTTP and disposa
 SQLite storage); final ownership/freshness/spread checks: 27 passed in 1.27 seconds.
 These runs overlap. Compileall and diff checks passed. The final full suite and
 real-scanner positive product fixtures remain pending.
+
+## Customer delivery and real product path (group E)
+
+Customer cards identify TP2 RR, preserve stored exchange price precision, state
+hard-stop price contact and conditional risk-based execution, and show optional
+derivatives availability explicitly. Zone and TP updates say observed/reached;
+simulated tracking never claims user fills, realized profit or exchange execution.
+Existing TP/BE history, receipt identity, outbox fencing and deduplication remain.
+The generic legacy trade-alert renderer now delegates to the same public economic
+validator, carries modeled execution cost and cannot relabel an asserted best RR
+as TP2 RR or confirm an incomplete/sub-3R plan.
+
+Real orchestration found and corrected three integration gaps: native Binance
+candles use the existing `binance_futures` venue label; optional derivatives
+absence was double-penalized as invalid mandatory data; independent target
+suggestions could contradict the final structural TP2. Exact futures aliases
+now normalize consistently, mandatory health uses the existing required/optional
+classifier for V2, and target assessment revalidates the final plan rather than
+selecting a competing TP2. Legacy target-policy behavior and all numerical public
+score/quality/RR floors remain unchanged. No confidence score is invented.
+
+A structural zone awaiting contact/reaction retains its protected conditional
+plan and its explicit failed entry gate. The existing near-miss/WATCH policy
+recognizes these pending-entry reasons. Execution eligibility remains false,
+confirmation count is zero, and a new closed reaction plus separate qualifying
+observation is required before public confirmation.
+
+`tests/test_integrated_signal_product.py` uses real CMC U100 qualification and
+identity intersection, native Binance HTTP normalization/evidence capture, real
+ScannerRunner, LiquidityGrabEngine, risk and quality assessment, lifecycle,
+disposable SQLite and fake Telegram. Automatic epoch/origin test shortcuts are
+disabled. It proves LONG/SHORT construction at 0.618/0.750/0.786, native closed
+timeframes, protected stops, net TP2 RR >=3, optional-derivatives outages,
+TRIGGERED-to-CONFIRMED progression, one send across repeated delivery, and
+complete public output. A separate natural WATCH-to-trigger-to-confirmation
+case keeps the same setup identity. Invalidated, weak-volume, wick-only,
+unconfirmed-4H, low-RR, stale-daily and structural-provider-failure cases reject.
+
+Focused verification includes 210 passing tests (native product construction,
+target assessment, candle integrity and acquisition provenance), 245 passing
+strategy/lifecycle/quality/fake-delivery tests, and 104 passing ownership,
+foreign-plan attack and active-dashboard tests. Runs overlap. A previous full
+run reported 54 failures and 4,340 passes; those failures were repaired with
+truthful positive fixture economics and updated observed-event assertions.
+The fresh full-suite run and exact-head CI are pending; this is not yet a
+functional-completion claim.
+
+Old positive public fixtures asserting stronger RR than their actual TP2 were
+corrected before persistence/ownership. Existing negative cases and assertions
+remain. Disk-cache lineage tests now observe a hit inside the deliberate
+one-second retry window for an incomplete latest candle; expired entries still
+refetch. Cache value-integrity probes run under asyncio because acquisition
+deduplication now creates tasks. The optional-timeout test has an explicit
+250ms delayed optional source against a 100ms request budget and additionally
+asserts the actual timeout diagnostic; mandatory setup work is not assigned an
+unrealistic 10ms budget. Source-inventory anchors/artifacts were regenerated.

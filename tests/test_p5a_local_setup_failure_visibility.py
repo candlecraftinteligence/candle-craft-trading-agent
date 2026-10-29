@@ -105,6 +105,14 @@ def test_real_main_missing_local_ca_must_be_visible(tmp_path: Path, monkeypatch,
         TIMEFRAME,
     ]
     if watch:
+        # ScannerRunner is injected above. Its new shared pool is likewise
+        # injected; keep the owned-plan client on the real failing TLS path.
+        original_factory = run_scan._public_exchange_client
+        class PublicPool:
+            async def aclose(self):
+                pass
+        monkeypatch.setattr(run_scan, "_public_exchange_client", lambda _args: PublicPool())
+        monkeypatch.setattr(run_scan, "_owner_monitoring_client", original_factory)
         output = tmp_path / "watch.jsonl"
         args += [
             "--watch",

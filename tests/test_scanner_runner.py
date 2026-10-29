@@ -1009,12 +1009,12 @@ def test_one_slow_symbol_does_not_stop_full_scan_runtime_stats() -> None:
 def test_optional_endpoint_timeout_is_marked_na_without_blocking_scan() -> None:
     client = FakeExchangeClient(
         {"BTCUSDT": _flat_candles()},
-        delayed_methods={"get_open_interest_history": 0.05},
+        delayed_methods={"get_open_interest_history": 0.25},
     )
 
     result = run(
         ScannerRunner(exchange_client=client).run(
-            _config(["BTCUSDT"], request_timeout_sec=0.01, symbol_timeout_sec=1)
+            _config(["BTCUSDT"], request_timeout_sec=0.1, symbol_timeout_sec=3)
         )
     )
 
@@ -1022,6 +1022,7 @@ def test_optional_endpoint_timeout_is_marked_na_without_blocking_scan() -> None:
     assert symbol_result.status != ScannerPipelineStatus.SCAN_ERROR
     assert "open_interest_history: N/A" in symbol_result.missing_data
     assert any("open_interest_history unavailable" in warning for warning in symbol_result.derivatives_warnings)
+    assert any("timed out after 0.1" in warning for warning in symbol_result.derivatives_warnings)
 
 
 def test_progress_output_callback_receives_symbol_stages() -> None:

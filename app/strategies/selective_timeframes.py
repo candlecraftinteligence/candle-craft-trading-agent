@@ -6,6 +6,9 @@ from app.data.candle_freshness import assess_essential_discovery
 from app.data.candle_integrity import closed_candles_as_of, normalize_utc_timestamp, timeframe_duration
 
 HIERARCHY = ("1d", "12h", "4h", "15m", "15m")
+# Native normalizers identify the precise derivatives venue; scanner config
+# uses the existing short names. No spot or cross-exchange alias is admitted.
+SOURCE_EXCHANGES = {"binance": {"binance", "binance_futures"}, "bybit": {"bybit", "bybit_linear"}}
 
 
 def closed_selective_timeframes(data: Any) -> dict[str, tuple[Any, ...]]:
@@ -24,7 +27,8 @@ def closed_selective_timeframes(data: Any) -> dict[str, tuple[Any, ...]]:
             raise ValueError(f"candles_{timeframe}: N/A")
         for candle in raw:
             get = candle.get if isinstance(candle, Mapping) else lambda key: getattr(candle, key, None)
-            if (get("interval") != timeframe or get("symbol") != data.symbol or get("exchange") != data.exchange):
+            if (get("interval") != timeframe or get("symbol") != data.symbol
+                    or get("exchange") not in SOURCE_EXCHANGES[data.exchange]):
                 raise ValueError(f"candles_{timeframe}_source_identity: Unverified")
             duration_ms = int(timeframe_duration(timeframe).total_seconds() * 1000)
             timestamp_ms = int(normalize_utc_timestamp(get("timestamp")).timestamp() * 1000)

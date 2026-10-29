@@ -156,7 +156,9 @@ def _public_min_rr_pullback_candles() -> list[dict[str, Decimal | int]]:
     pattern[33]["high"] = Decimal("100")
     pattern[35]["open"] = Decimal("116")
     pattern[35]["high"] = Decimal("126")
-    pattern[35]["low"] = Decimal("113")
+    # A narrow real FVG overlap gives >=3R even at the worst zone edge.
+    # The former wide overlap only cleared 3R from its midpoint.
+    pattern[35]["low"] = Decimal("100.662")
     pattern[35]["close"] = Decimal("124")
     pattern[35]["volume"] = Decimal("300")
     return candles + pattern

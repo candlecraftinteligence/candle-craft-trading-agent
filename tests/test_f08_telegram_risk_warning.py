@@ -105,7 +105,7 @@ def test_trade_map_announcements_carry_one_warning_before_the_signature() -> Non
     assert "🟢 SIGNAL CONFIRMED" in upgraded
     assert "Research Watch" in research
     assert "SIGNAL CONFIRMED" not in research
-    assert "Invalid if price body-closes and accepts below 95." in watchlist
+    assert "Invalidation: hard stop on price contact at or below 95." in watchlist
     assert "🛡 SL 95" in confirmed
 
 

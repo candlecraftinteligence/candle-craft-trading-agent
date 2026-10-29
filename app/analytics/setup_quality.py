@@ -69,7 +69,8 @@ FINAL_QUALITY_GATES = {
     "quality_filter",
     *TARGET_INTEGRITY_GATES,
 }
-LATE_GATES = PULLBACK_GATES | RR_GATES | FINAL_QUALITY_GATES
+ENTRY_PENDING_GATES = {"entry_zone_not_touched", "entry_confirmation_missing"}
+LATE_GATES = PULLBACK_GATES | RR_GATES | FINAL_QUALITY_GATES | ENTRY_PENDING_GATES
 
 
 class SetupQualityState(str, Enum):
