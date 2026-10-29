@@ -92,7 +92,7 @@ from app.alerts.telegram_lifecycle import (  # noqa: E402
 from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa: E402
 from app.alerts.provenance_diagnostics import summary_provenance, unavailable_provenance  # noqa: E402
 from app.watch_session import WatchSession, append_session_observation  # noqa: E402
-from app.core.phase_profile import PhaseProfile, current_observations, profiled  # noqa: E402
+from app.core.phase_profile import PhaseProfile, PhaseProfile as _CorePhaseProfile, current_observations, profiled, suspend_phase_profile  # noqa: E402
 from app.runtime.disk_isolation import SerializedDiskWorker  # noqa: E402
 from app.runtime.loop_lag import LoopLagMonitor  # noqa: E402
 from app.runtime.lifecycle_isolation import LifecycleWorker  # noqa: E402
@@ -225,7 +225,7 @@ from app.watch_iteration import (  # noqa: E402
     watch_phase_error as _watch_phase_error,
 )
 from app.watch_supervisor import (  # noqa: E402
-    WatchFailureDisposition,
+    FatalWatchIterationError, WatchFailureDisposition,
     WatchIterationStatus,
     classify_watch_exception,
     failure_backoff_seconds,
@@ -2362,7 +2362,7 @@ def _handle_history_command(args: argparse.Namespace) -> None:
             print(f"Exported scan history: {args.export_history_json}")
         if args.show_history:
             print(format_history_table(history))
-    except StorageError as exc:
+    except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
 
 
@@ -2390,7 +2390,7 @@ def _handle_research_command(args: argparse.Namespace) -> None:
     except ResearchDatabaseMissing as exc:
         print(str(exc))
         return
-    except StorageError as exc:
+    except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
 
     if args.research_output_json is not None:
@@ -3352,7 +3352,7 @@ def _apply_symbol_health_if_enabled(
             enabled=symbol_priority_plan.enabled or args.show_symbol_health,
             expected_identity=getattr(args, "runtime_identity", None),
         )
-    except StorageError as exc:
+    except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
     return result.model_copy(update={"symbol_health": summary})
 
@@ -3657,7 +3657,7 @@ async def _run_watch_mode(
             previous_state = state
             prior_failure_streak = failure_streak
             iteration_in_progress = True
-            profile = PhaseProfile()
+            profile = WatchPhaseProfile()
             profile.loop_lag = loop_lag
             profile.disk_worker = disk_worker
             profile.lifecycle_worker = lifecycle_worker
@@ -3874,8 +3874,25 @@ async def _run_watch_mode(
             stored_manifest_run_id = execution.storage_run_id
             if args.store_scan:
                 try:
-                    # SQLite connection stays on this thread. P0B owns that isolation.
-                    stored_manifest_run_id = profile.call("scan_storage", _store_watch_iteration_scan_run,
+                    if lifecycle_worker is not None:
+                        stored_manifest_run_id = await profile.acall(
+                            "scan_storage",
+                            _store_watch_iteration_scan_run_isolated,
+                            args,
+                            worker=lifecycle_worker,
+                            execution=execution,
+                            summary=summary.model_copy(update={
+                                "database_storage_status": "PENDING",
+                                "duration_scope": "through_watch_state_before_primary_scan_storage",
+                            }),
+                            started_at=iteration_started_at,
+                            completed_at=completed_at,
+                            runtime_sec=runtime_sec,
+                            command_used=command_used,
+                        )
+                    else:
+                        # SQLite connection stays on this thread when LifecycleWorker is absent.
+                        stored_manifest_run_id = profile.call("scan_storage", _store_watch_iteration_scan_run,
                         args,
                         execution=execution,
                         summary=summary.model_copy(update={
@@ -4113,6 +4130,7 @@ async def _run_watch_mode(
             if session is not None:
                 # WatchSession.__exit__ persists this under the still-held lease.
                 session.state["lifecycle_isolation_shutdown"] = lifecycle_worker.compact_snapshot()
+                session.state["scan_storage_isolation_shutdown"] = lifecycle_worker.scan_storage_snapshot()
         try:
             await disk_worker.aclose()
         except Exception as exc:
@@ -4756,6 +4774,82 @@ async def _run_watch_scan_iteration(
     )
 
 
+class WatchPhaseProfile(PhaseProfile):
+    """Watch-mode phase profile composing loop-lag, disk, lifecycle, and scan_storage telemetry."""
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        if clock is None and PhaseProfile is not _CorePhaseProfile:
+            try:
+                candidate = PhaseProfile()
+                if isinstance(candidate, _CorePhaseProfile) and hasattr(candidate, "_clock"):
+                    clock = candidate._clock
+            except (TypeError, AttributeError):
+                clock = None
+        super().__init__(clock=clock)
+
+    def snapshot(self, *, boundary: str) -> dict[str, Any]:
+        report = super().snapshot(boundary=boundary)
+        worker = self.lifecycle_worker
+        if worker is not None and hasattr(worker, "scan_storage_snapshot"):
+            scan_storage_iso = dict(worker.scan_storage_snapshot())
+            scan_storage_iso["LOOP_LAG_DURING_SCAN_STORAGE"] = (
+                self.loop_lag.compact_snapshot()["phase_sampled_lag_seconds_max"].get("scan_storage", NA)
+                if self.loop_lag is not None
+                else NA
+            )
+            scan_storage_iso["IN_FLIGHT_AT_SHUTDOWN"] = worker.compact_snapshot().get("IN_FLIGHT_AT_SHUTDOWN", 0)
+            report["scan_storage_isolation"] = scan_storage_iso
+        return report
+
+
+async def _store_watch_iteration_scan_run_isolated(
+    args: argparse.Namespace,
+    *,
+    worker: LifecycleWorker | None = None,
+    execution: WatchScanExecution,
+    summary: WatchIterationSummary,
+    started_at: str,
+    completed_at: str,
+    runtime_sec: float,
+    command_used: str,
+) -> str:
+    if worker is None:
+        with suspend_phase_profile():
+            return _store_watch_iteration_scan_run(
+                args,
+                execution=execution,
+                summary=summary,
+                started_at=started_at,
+                completed_at=completed_at,
+                runtime_sec=runtime_sec,
+                command_used=command_used,
+            )
+    try:
+        return await worker.call(
+            _store_watch_iteration_scan_run,
+            args,
+            stage="scan_storage",
+            execution=execution,
+            summary=summary,
+            started_at=started_at,
+            completed_at=completed_at,
+            runtime_sec=runtime_sec,
+            command_used=command_used,
+        )
+    except (Exception, SystemExit) as exc:
+        task = asyncio.current_task()
+        interruption = getattr(exc, "_cci_lifecycle_interruption", None)
+        if isinstance(interruption, (asyncio.CancelledError, KeyboardInterrupt)):
+            del exc._cci_lifecycle_interruption
+        else:
+            interruption = None
+        if (interruption is not None or (task is not None and task.cancelling())) and (
+            classify_watch_exception(exc) != WatchFailureDisposition.FATAL
+        ):
+            raise (interruption if interruption is not None else asyncio.CancelledError()) from exc
+        raise
+
+
 @profiled("scan_storage")
 def _store_watch_iteration_scan_run(
     args: argparse.Namespace,
@@ -4816,7 +4910,7 @@ def _store_watch_iteration_scan_run(
             inline_raw_payload=_scan_raw_payload_inline_only(),
             expected_identity=getattr(args, "runtime_identity", None),
         )
-    except StorageError as exc:
+    except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
 
 
