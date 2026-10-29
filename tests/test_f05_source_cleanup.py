@@ -30,7 +30,7 @@ from tests.test_f05_discovery_fail_closed import (
 )
 from tests.test_p5a_active_owner_monitoring import _event_count, _progress, _seed_entered
 from tests.test_p5a_monitoring_binding_query_repair import _KlineClient
-from tests.test_watch_mode import SequenceWatchRunner
+from tests.test_watch_mode import SequenceWatchRunner, _valid_symbol
 
 CLEANUP_TEXT = "synthetic HTTP client cleanup failure"
 RANKING_CLEANUP_TEXT = "synthetic ranking client cleanup failure"
@@ -112,12 +112,12 @@ def _arm_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, o
     return path, owner, before
 
 
-def _watch_argv(path: Path, output: Path) -> list[str]:
+def _watch_argv(path: Path, output: Path, *, iterations: int = 1) -> list[str]:
     return _strict_argv(
         path,
         "--watch",
         "--watch-max-iterations",
-        "1",
+        str(iterations),
         "--watch-interval-sec",
         "0.01",
         "--watch-output-file",
@@ -234,18 +234,82 @@ def test_watch_startup_cleanup_failure_continues_owner_monitoring(
     monkeypatch.setattr(run_scan, "_owner_monitoring_client", lambda args: calls.append("client") or _KlineClient())
     output = tmp_path / "watch.jsonl"
 
-    with pytest.raises(SystemExit) as raised:
-        asyncio.run(run_scan.main(_watch_argv(path, output)))
+    asyncio.run(run_scan.main(_watch_argv(path, output)))
 
-    assert "exchange-info source returned empty" in str(raised.value.code)
-    assert CLEANUP_TEXT in str(raised.value.code)
-    assert discovery_failure_continues_owner_monitoring(raised.value) is True
+    summary = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    text = " ".join(summary["errors"])
+    assert summary["status"] == "FAILED"
+    assert summary["symbols_watched"] == 0
+    assert "exchange-info source returned empty" in text
+    assert CLEANUP_TEXT in text
     assert calls == ["client"]
-    assert not output.exists()
+    assert SequenceWatchRunner.configs == []
     _assert_no_discovery(path)
     with SQLiteSetupLifecycleRepository(path) as repository:
         stored = _progress(repository, owner.lifecycle_id)
     assert stored.evaluation_cursor_close_at != before
+
+
+def test_watch_startup_outage_retries_then_scans_only_the_fresh_universe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, _owner, _before = _arm_owner(tmp_path, monkeypatch)
+    state = {"calls": 0}
+
+    async def rankings() -> list[dict[str, object]]:
+        state["calls"] += 1
+        return [_asset("BTC", 1)]
+
+    class FakeBinance:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def get_24h_tickers(self) -> list[dict[str, str]]:
+            return [_ticker("BTC")]
+
+        async def get_exchange_info(self) -> dict[str, object]:
+            if state["calls"] < 3:
+                return {"symbols": []}
+            return {"symbols": [_contract("BTC")]}
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(symbol_universe, "fetch_coinpaprika_market_cap_rankings", rankings)
+    monkeypatch.setattr(symbol_universe, "BinanceFuturesClient", FakeBinance)
+    _capture_runner([(_valid_symbol("BTCUSDT"),)])
+    monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
+    monkeypatch.setattr(run_scan, "_owner_monitoring_client", lambda args: _KlineClient())
+    monkeypatch.setattr(run_scan, "_discovery_retry_jitter", lambda: 0.0)
+    sleeps: list[float] = []
+
+    async def fast_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    output = tmp_path / "watch.jsonl"
+
+    asyncio.run(run_scan.main(_watch_argv(path, output, iterations=2)))
+
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    failed = json.loads(lines[0])
+    recovered = json.loads(lines[1])
+    assert failed["status"] == "FAILED"
+    assert failed["symbols_watched"] == 0
+    assert recovered["status"] in {"SUCCESS", "PARTIAL"}
+    assert sleeps and 0 < min(sleeps) <= run_scan.failure_backoff_seconds(1)
+    scanned_symbols = [
+        item.symbol
+        for config in SequenceWatchRunner.configs
+        for item in config.symbols
+    ]
+    assert scanned_symbols == ["BTCUSDT"]
+    assert "CAKEUSDT" not in scanned_symbols
+    assert run_scan._DISCOVERY_CONFIG_PLACEHOLDER not in scanned_symbols
+    assert "CAKEUSDT" in _lifecycle_symbols(path)
+    assert _table_count(path, "public_alert_events") <= 1
 
 
 @pytest.mark.parametrize("path_kind", ["one_shot", "watch_refresh"])
