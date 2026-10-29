@@ -109,8 +109,8 @@ def authorized_snapshot(snapshot, manifest, as_of):
         "errors":(*snapshot.errors,"restored_identity_not_currently_owner_approved") if removed else snapshot.errors})
 
 
-async def service_for(settings):
-    if Mode(settings.cmc_mode) == Mode.OFF:
+async def service_for(settings, *, discovery: bool = False):
+    if Mode(settings.cmc_mode) == Mode.OFF and not discovery:
         return None
     loop = asyncio.get_running_loop()
     key = (str(settings.cmc_sidecar_path), str(settings.cmc_identity_manifest), settings.cmc_keyless,
@@ -150,3 +150,10 @@ async def begin_collection(settings=None):
     if service is not None:
         service.schedule()
     return service
+
+
+async def close_services():
+    """Close only this loop's owned CMC clients and collection tasks."""
+    services = _services.pop(asyncio.get_running_loop(), {})
+    for service in services.values():
+        await service.close()

@@ -24,6 +24,8 @@ class AssetBinding(Frozen):
     reviewed_at: datetime | None = None
     expires_at: datetime | None = None
     owner_approval_ref: str | None = None
+    qualification_class: str | None = None
+    contract_multiplier: int = Field(default=1, ge=1, le=1000000)
 
 
 class IdentityStatus(str, Enum):

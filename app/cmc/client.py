@@ -5,11 +5,14 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
+import random
 import sqlite3
 import time
 from collections import OrderedDict, deque
 from datetime import UTC, datetime
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 
 import httpx
@@ -45,7 +48,7 @@ class CmcClient:
                  max_entries: int = 16, max_body_bytes: int = 1024 * 1024,
                  requests_per_minute: int = 45,
                  clock: Callable = lambda: datetime.now(UTC), monotonic: Callable = time.monotonic,
-                 sleep: Callable = asyncio.sleep):
+                 sleep: Callable = asyncio.sleep, jitter: Callable = random.random):
         if (not 1 <= concurrency <= 8 or not 1 <= attempts <= 5 or timeout <= 0 or max_entries < 1
                 or max_body_bytes < 1 or not 1 <= requests_per_minute <= 50):
             raise ValueError("invalid CMC resource limits")
@@ -56,6 +59,7 @@ class CmcClient:
         self.daily, self.monthly = daily_credits, monthly_credits
         self.max_entries, self.max_body = max_entries, max_body_bytes
         self.clock, self.monotonic, self.sleep = clock, monotonic, sleep
+        self.jitter = jitter
         self._semaphore = asyncio.Semaphore(concurrency)
         self._request_times = deque(maxlen=requests_per_minute)
         self._rate_lock = asyncio.Lock()
@@ -163,6 +167,8 @@ class CmcClient:
         result = self._error(endpoint, "attempts_exhausted")
         async with self._semaphore:
             for attempt in range(self.attempts):
+                if self.monotonic() < self._open_until:
+                    return self._error(endpoint, "rate_or_circuit_cooldown", EvidenceState.UNAVAILABLE)
                 await self._rate_slot()
                 estimate = reserved_credits(endpoint, params)
                 reserved_at = self.clock()
@@ -178,7 +184,12 @@ class CmcClient:
                         break
                     if response_code == 429 or response_code >= 500:
                         result = self._error(endpoint, f"http_{response_code}")
-                        delay = min(2, max(0, float(response_headers.get("retry-after", 0))))
+                        delay = self._retry_after(response_headers.get("retry-after"))
+                        if response_code == 429 and delay > 2:
+                            # Return control to owned-plan monitoring immediately. Do
+                            # not sleep through a long rate limit or retry early.
+                            self._open_until = max(self._open_until, self.monotonic() + delay)
+                            break
                     elif response_code != 200:
                         result = self._error(endpoint, f"http_{response_code}")
                         break
@@ -206,12 +217,24 @@ class CmcClient:
                     result = self._error(endpoint, "network_or_response_contract")
                     delay = 0
                 if attempt + 1 < self.attempts:
-                    await self.sleep(max(delay, min(2, 0.25 * (2 ** attempt))))
+                    exponential = min(2, 0.25 * (2 ** attempt))
+                    await self.sleep(max(delay, exponential * (0.5 + 0.5 * self.jitter())))
         self._failures += 1
         if self._failures >= 3:
-            self._open_until = self.monotonic() + 60
+            self._open_until = max(self._open_until, self.monotonic() + 60)
         self.capabilities[endpoint.value] = result.state.value + ":" + str(result.error)
         return result
+
+    def _retry_after(self, value):
+        try:
+            seconds = float(value)
+            return max(0, seconds) if math.isfinite(seconds) else 0
+        except (ValueError, TypeError):
+            try:
+                at = parsedate_to_datetime(value)
+                return max(0, (at - self.clock()).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                return 0
 
     async def _rate_slot(self):
         async with self._rate_lock:

@@ -17,6 +17,7 @@ from app.universe.canonical_qualification import (
     VERIFIED_CONTRACT_MAPPINGS,
     CanonicalUniverseError,
     QualifiedAsset,
+    VerifiedContractMapping,
     acquired_timestamp,
     qualify_canonical_cohort,
 )
@@ -28,6 +29,7 @@ BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE = "binance_usdt_perp_top_market_cap"
 BINANCE_USDM_24H_TICKER_SOURCE = "binance_usdm_24h_ticker_public"
 BINANCE_USDM_EXCHANGE_INFO_SOURCE = "binance_usdm_exchange_info_public"
 COINPAPRIKA_MARKET_CAP_SOURCE = "coinpaprika_market_cap_public"
+CMC_MARKET_CAP_SOURCE = "coinmarketcap_market_cap_rest"
 COINPAPRIKA_BASE_URL = "https://api.coinpaprika.com/v1"
 MANUAL_SOURCE = "manual"
 UNIVERSE_MODES = (
@@ -231,6 +233,7 @@ async def resolve_symbol_universe(
     market_cap_fetcher: MarketCapFetcher | None = None,
     exchange_info_fetcher: ExchangeInfoFetcher | None = None,
     generated_at: str | None = None,
+    market_cap_provider: str = "coinpaprika",
 ) -> SymbolUniverse:
     if mode == MANUAL_UNIVERSE_MODE:
         raise ValueError("manual universe resolution requires explicit symbols")
@@ -242,8 +245,15 @@ async def resolve_symbol_universe(
             if market_cap_fetcher is not None:
                 raw_market_caps = market_cap_fetcher()
                 market_caps = await raw_market_caps if inspect.isawaitable(raw_market_caps) else raw_market_caps
-            else:
+            elif market_cap_provider == "cmc":
+                from app.cmc.universe import fetch_rankings
+
+                snapshot = await fetch_rankings()
+                market_caps = snapshot.assets
+            elif market_cap_provider == "coinpaprika":
                 market_caps = await fetch_coinpaprika_market_cap_rankings()
+            else:
+                raise ValueError("unsupported market-cap provider")
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except UniverseResolutionError:
@@ -307,6 +317,8 @@ async def resolve_symbol_universe(
                 universe_size=universe_size,
                 min_quote_volume=min_quote_volume,
                 generated_at=generated_at,
+                ranking_source=CMC_MARKET_CAP_SOURCE if market_cap_provider == "cmc" else COINPAPRIKA_MARKET_CAP_SOURCE,
+                verified_mappings=snapshot.mappings if market_cap_provider == "cmc" and market_cap_fetcher is None else None,
             )
         except UniverseResolutionError as exc:
             if cleanup_error is not None:
@@ -320,6 +332,11 @@ async def resolve_symbol_universe(
             raise
         if cleanup_error is not None:
             raise _cleanup_failure("Binance USDT perpetual source", cleanup_error)
+        if market_cap_provider == "cmc" and market_cap_fetcher is None:
+            universe = replace(universe, diagnostics={**universe.diagnostics,
+                "cmc_source_timestamp": snapshot.source_at.isoformat(),
+                "cmc_acquired_at": snapshot.acquired_at.isoformat(),
+                "cmc_raw_ref": snapshot.raw_ref})
         return universe
 
     if ticker_fetcher is not None:
@@ -413,6 +430,8 @@ def build_symbol_universe_from_market_caps(
     exchange_info: Mapping[str, Any] | None = None,
     min_quote_volume: Decimal | str | int = Decimal("0"),
     generated_at: str | None = None,
+    ranking_source: str = COINPAPRIKA_MARKET_CAP_SOURCE,
+    verified_mappings: Mapping[str, VerifiedContractMapping] | None = None,
 ) -> SymbolUniverse:
     if universe_size < 1:
         raise ValueError("universe_size must be at least 1")
@@ -448,7 +467,10 @@ def build_symbol_universe_from_market_caps(
             acquired_at=acquired_at,
         )
     except CanonicalUniverseError as exc:
-        raise UniverseResolutionError(str(exc)) from exc
+        message = str(exc)
+        if ranking_source == CMC_MARKET_CAP_SOURCE:
+            message = message.replace("CoinPaprika", "CMC")
+        raise UniverseResolutionError(message) from exc
 
     selected, identity_rejections = _select_qualified_perpetuals(
         cohort.cohort,
@@ -457,6 +479,8 @@ def build_symbol_universe_from_market_caps(
         observed_volumes=observed_volumes,
         admissible_volumes=quote_volume_by_symbol,
         minimum_volume=minimum_volume,
+        verified_mappings=verified_mappings,
+        require_verified_identity=ranking_source == CMC_MARKET_CAP_SOURCE,
     )
     if not selected:
         raise UniverseResolutionError(
@@ -478,7 +502,7 @@ def build_symbol_universe_from_market_caps(
         "verified_contract_mismatch", 0
     )
     diagnostics = {
-        "provider": COINPAPRIKA_MARKET_CAP_SOURCE,
+        "provider": ranking_source,
         "exchange_availability_source": BINANCE_USDM_EXCHANGE_INFO_SOURCE,
         "qualification_policy": "conservative_genuine_crypto_top_n",
         "acquisition_timestamp": acquired_at.isoformat().replace("+00:00", "Z"),
@@ -562,7 +586,7 @@ def build_symbol_universe_from_market_caps(
         requested_size=universe_size,
         resolved_symbols=tuple(match.exchange_symbol for _asset, match in selected),
         excluded_symbols=_dedupe(excluded),
-        source=COINPAPRIKA_MARKET_CAP_SOURCE,
+        source=ranking_source,
         generated_at=acquired_at.isoformat().replace("+00:00", "Z"),
         min_quote_volume=minimum_volume,
         quote_volume_by_symbol={
@@ -794,6 +818,8 @@ def _select_qualified_perpetuals(
     observed_volumes: Mapping[str, Decimal],
     admissible_volumes: Mapping[str, Decimal],
     minimum_volume: Decimal,
+    verified_mappings: Mapping[str, VerifiedContractMapping] | None = None,
+    require_verified_identity: bool = False,
 ) -> tuple[tuple[tuple[QualifiedAsset, _ExchangeIdentityMatch], ...], list[dict[str, Any]]]:
     """Intersect the qualified cohort with admissible contracts. Never backfill."""
 
@@ -804,6 +830,8 @@ def _select_qualified_perpetuals(
             asset,
             contracts=contracts,
             eligible_symbol_counts=eligible_symbol_counts,
+            verified_mappings=verified_mappings,
+            require_verified_identity=require_verified_identity,
         )
         if match is None:
             rejections.append(_identity_rejection(asset, reason or "no_binance_perp"))
@@ -833,9 +861,12 @@ def _match_qualified_identity(
     *,
     contracts: Mapping[str, _ContractEvidence],
     eligible_symbol_counts: Mapping[str, int],
+    verified_mappings: Mapping[str, VerifiedContractMapping] | None = None,
+    require_verified_identity: bool = False,
 ) -> tuple[_ExchangeIdentityMatch | None, str | None]:
     collision_count = eligible_symbol_counts.get(asset.provider_symbol, 1)
-    verified = VERIFIED_CONTRACT_MAPPINGS.get(asset.provider_id)
+    registry = VERIFIED_CONTRACT_MAPPINGS if verified_mappings is None else verified_mappings
+    verified = registry.get(asset.provider_id)
     if verified is not None:
         if verified.provider_symbol != asset.provider_symbol:
             return None, "identity_mapping_rejected"
@@ -853,6 +884,8 @@ def _match_qualified_identity(
             return None, "invalid_multiplier"
         status = "verified_disambiguation" if collision_count > 1 else "verified_unique"
         return _identity_match(contract, verified.contract_multiplier, status), None
+    if require_verified_identity:
+        return None, "unverified_cmc_identity"
     if collision_count > 1:
         return None, "unresolved_ambiguity"
     contract = contracts.get(f"{asset.provider_symbol}USDT")
@@ -919,6 +952,7 @@ def _identity_rejection(
 
 def _membership_diagnostic(asset: QualifiedAsset, match: _ExchangeIdentityMatch) -> dict[str, Any]:
     return {
+        **({"cmc_id": int(asset.provider_id[4:])} if asset.provider_id.startswith("cmc:") else {}),
         "provider_id": asset.provider_id,
         "provider_symbol": asset.provider_symbol,
         "provider_name": asset.provider_name,

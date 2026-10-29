@@ -141,6 +141,29 @@ def test_circuit_breaker_and_unavailable_credentials(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("retry_after", ["120", "Thu, 01 Jan 2026 00:02:00 GMT"])
+def test_long_retry_after_yields_to_monitoring_without_retrying_early(tmp_path, retry_after):
+    async def scenario():
+        calls, sleeps, now = [], [], [0.0]
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(429, headers={"Retry-After": retry_after})
+        async def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = CmcClient(store=Sidecar(tmp_path/"cmc_retry_after.sqlite"), keyless=True,
+                               http_client=http, clock=lambda: AT, monotonic=lambda: now[0], sleep=sleep)
+            assert (await client.get(Endpoint.GLOBAL)).error == "http_429"
+            assert (await client.get(Endpoint.LISTINGS)).error == "circuit_open"
+            assert len(calls) == 1 and sleeps == []
+            now[0] = 121
+            assert (await client.get(Endpoint.GLOBAL, refresh=True)).error == "http_429"
+            assert len(calls) == 2
+            await client.aclose()
+    asyncio.run(scenario())
+
+
 def test_pagination_and_contract_parameters(tmp_path):
     async def scenario():
         starts=[]

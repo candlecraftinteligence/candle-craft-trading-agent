@@ -4,12 +4,13 @@ import argparse
 import asyncio
 import inspect
 import json
+import random
 import sys
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -228,12 +229,17 @@ from app.watch_supervisor import (  # noqa: E402
     FatalWatchIterationError, WatchFailureDisposition,
     WatchIterationStatus,
     classify_watch_exception,
+    discovery_retry_backoff_seconds,
     failure_backoff_seconds,
     schedule_after_iteration,
 )
 
 
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+# ScannerRunConfig rejects an empty symbol list. This placeholder keeps the
+# config constructable while discovery is down. It is not exchange membership
+# and must never be queued for a scan.
+_DISCOVERY_CONFIG_PLACEHOLDER = "CCI_DISCOVERY_UNVERIFIED"
 LATEST_RUN_PATH = DEFAULT_LATEST_RUN_PATH
 WATCH_STATE_PATH = DEFAULT_WATCH_STATE_PATH
 WATCH_STATE_CANONICAL_BASE_DIR = DEFAULT_WATCH_STATE_PATH.parent
@@ -785,15 +791,19 @@ async def main(argv: Sequence[str] | None = None) -> None:
         args.list_command_presets or args.list_presets or args.research
         or args.show_history or args.export_history_json is not None
     )
-    if args.watch and (args.reset_lifecycle or not report_only):
-        with WatchSession(
-            args.database_path, interval_seconds=args.watch_interval_sec,
-            on_observation=lambda row: append_session_observation(args.database_path, row),
-            on_advisory=print,
-        ) as session:
-            await _main(args, argv=argv, session=session)
-    else:
-        await _main(args, argv=argv)
+    try:
+        if args.watch and (args.reset_lifecycle or not report_only):
+            with WatchSession(
+                args.database_path, interval_seconds=args.watch_interval_sec,
+                on_observation=lambda row: append_session_observation(args.database_path, row),
+                on_advisory=print,
+            ) as session:
+                await _main(args, argv=argv, session=session)
+        else:
+            await _main(args, argv=argv)
+    finally:
+        from app.cmc.runtime import close_services
+        await close_services()
 
 
 async def _main(
@@ -820,9 +830,14 @@ async def _main(
     try:
         watchlist = await _resolve_watchlist_for_args(args)
     except (Exception, SystemExit) as exc:
-        if discovery_failure_continues_owner_monitoring(exc):
-            await _surface_monitoring_during_discovery_failure(args, exc)
-        raise
+        if args.watch and discovery_failure_continues_owner_monitoring(exc):
+            # Stay inside this watch session. The loop retries discovery and
+            # monitors owned plans; the placeholder is not scan membership.
+            watchlist = _discovery_unavailable_watchlist(args, exc)
+        else:
+            if discovery_failure_continues_owner_monitoring(exc):
+                await _surface_monitoring_during_discovery_failure(args, exc)
+            raise
     watchlist = _watchlist_with_lifecycle_priority(args, watchlist)
     diagnostics_level = args.diagnostics_level
     if args.verbose and not args.diagnostics_level_explicit:
@@ -834,7 +849,7 @@ async def _main(
 
     config = ScannerRunConfig(
         cmc_mode=runtime_settings.cmc_mode,
-        symbols=watchlist.symbols,
+        symbols=watchlist.symbols or (_DISCOVERY_CONFIG_PLACEHOLDER,),
         exchange=args.exchange,
         interval=args.interval,
         candle_limit=effective_candle_limit,
@@ -1688,6 +1703,7 @@ async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistReso
             args.universe,
             universe_size=args.universe_size,
             min_quote_volume=args.min_quote_volume,
+            **({"market_cap_provider": "cmc"} if Settings().market_cap_provider == "cmc" else {}),
         )
         include_symbols = validate_symbols(args.include_symbols, context="--include-symbols")
         exclude_symbols = set(validate_symbols(args.exclude_symbols, context="--exclude-symbols"))
@@ -3690,11 +3706,15 @@ async def _run_watch_mode(
                 disposition = classify_watch_exception(iteration_error)
                 if disposition == WatchFailureDisposition.RECOVERABLE:
                     failure_streak += 1
-                selected_backoff = (
-                    failure_backoff_seconds(failure_streak)
-                    if disposition == WatchFailureDisposition.RECOVERABLE
-                    else 0.0
-                )
+                if disposition != WatchFailureDisposition.RECOVERABLE:
+                    selected_backoff = 0.0
+                elif discovery_failure_continues_owner_monitoring(iteration_error):
+                    selected_backoff = discovery_retry_backoff_seconds(
+                        failure_streak,
+                        jitter=_discovery_retry_jitter(),
+                    )
+                else:
+                    selected_backoff = failure_backoff_seconds(failure_streak)
                 finished_monotonic = time.monotonic()
                 schedule = schedule_after_iteration(
                     scheduled_start_monotonic=scheduled_start_monotonic,
@@ -3749,6 +3769,7 @@ async def _run_watch_mode(
                 await asyncio.sleep(max(0.0, scheduled_start_monotonic - time.monotonic()))
                 continue
             assert iteration_watchlist is not None and execution is not None
+            watchlist = iteration_watchlist
             completed_at = _watch_iteration_timestamp()
             activations: list[WatchActivation] = []
             updated_state = previous_state
@@ -4425,12 +4446,54 @@ def _record_failed_watch_iteration(
         print(f"Warning: failed iteration manifest persistence failed safely: {type(exc).__name__}: {exc}")
 
 
+def _discovery_retry_jitter() -> float:
+    return random.random()
+
+
+def _verified_discovery_watchlist(watchlist: WatchlistResolution) -> bool:
+    diagnostics = watchlist.universe.diagnostics
+    if diagnostics.get("discovery_status") == "unavailable":
+        return False
+    if diagnostics.get("verified_membership") is False:
+        return False
+    return _DISCOVERY_CONFIG_PLACEHOLDER not in watchlist.symbols
+
+
+def _discovery_unavailable_watchlist(
+    args: argparse.Namespace,
+    exc: BaseException,
+) -> WatchlistResolution:
+    """A non-admission placeholder used only until a fresh universe resolves."""
+
+    universe = SymbolUniverse(
+        mode=str(args.universe),
+        requested_size=int(args.universe_size),
+        resolved_symbols=(),
+        excluded_symbols=(),
+        source="discovery_unavailable",
+        generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        diagnostics={
+            "discovery_status": "unavailable",
+            "verified_membership": False,
+            "new_setup_admission": "blocked",
+            "reason": _watch_phase_error("discovery", exc),
+        },
+    )
+    return WatchlistResolution(
+        symbols=(),
+        source_label="discovery unavailable; monitoring owned plans only",
+        universe=universe,
+    )
+
+
 @profiled("universe")
 async def _watchlist_for_watch_iteration(
     args: argparse.Namespace,
     startup_watchlist: WatchlistResolution,
 ) -> WatchlistResolution:
-    if _watch_mode_refreshes_universe(args):
+    if not _verified_discovery_watchlist(startup_watchlist):
+        watchlist = await _resolve_watchlist_for_args(args)
+    elif _watch_mode_refreshes_universe(args):
         watchlist = await _resolve_watchlist_for_scan(args)
     else:
         watchlist = startup_watchlist
@@ -4460,6 +4523,10 @@ async def _run_watch_scan_iteration(
     liquidation_flow_service: LiquidationFlowService | None = None,
     lifecycle_worker: LifecycleWorker | None = None,
 ) -> WatchScanExecution:
+    if not _verified_discovery_watchlist(watchlist):
+        raise UniverseResolutionError(
+            "universe_error: unverified discovery membership cannot create setups"
+        )
     phase_statuses = {"universe": "SUCCESS"}
     recoverable_errors: list[str] = []
     telegram_outbox_status: dict[str, int] = {}
