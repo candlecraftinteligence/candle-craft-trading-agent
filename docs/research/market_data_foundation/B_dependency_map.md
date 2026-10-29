@@ -5,7 +5,7 @@ Optional flags defaulting to false are not Runtime proof. `runtime_enabled` is u
 
 | metric | cache / missing behavior | decision role |
 | --- | --- | --- |
-| ohlcv_binance_usdm | CachedMarketDataClient.get_klines data_type=candles; freshness missing or unverified; missing bars are not zero volume | required for configured strategy timeframes |
+| ohlcv_binance_usdm | CachedMarketDataClient.get_klines data_type=candles; closed 4h/12h/1d stay cached until the next boundary when no explicit TTL is set; freshness missing or unverified; missing bars are not zero volume | required for configured strategy timeframes |
 | ohlcv_bybit_linear | same candle cache key family, exchange name bybit_linear; integrity rejects unordered or gapped series; derived close is not a publication time | required only on the Bybit exchange path |
 | ohlcv_synthetic_2d | cached as candles when the caller stores the result; incomplete pair emits nothing for that bucket | required only when the configured interval is 2d |
 | rolling_24h_ticker | data_type=ticker; missing quote volume excludes the ticker row; it is not treated as zero | required for market-cap discovery liquidity intersection; optional as a mark source |

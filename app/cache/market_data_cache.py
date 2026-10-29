@@ -55,6 +55,29 @@ class LocalCacheFetchResult:
     retained_upstream: Any | None
     file_loaded_entry: bool
 
+CLOSED_HIGHER_TIMEFRAME_SECONDS: dict[str, int] = {
+    "4h": 4 * 60 * 60,
+    "12h": 12 * 60 * 60,
+    "1d": 24 * 60 * 60,
+}
+
+
+def closed_higher_timeframe_ttl_seconds(interval: str, now: float) -> int | None:
+    """Seconds until the next closed 4H, 12H, or 1D boundary.
+
+    Those closed candles do not change inside the current boundary. The TTL
+    ends when the next candle can close, so a new close is not served stale.
+    """
+
+    seconds = CLOSED_HIGHER_TIMEFRAME_SECONDS.get(str(interval).strip().lower())
+    if seconds is None:
+        return None
+    remainder = seconds - (int(now) % seconds)
+    if remainder <= 0:
+        remainder = seconds
+    return int(remainder)
+
+
 DEFAULT_TTLS_SECONDS: dict[str, int] = {
     "candles": 60,
     "ticker": 15,
@@ -121,11 +144,13 @@ class MarketDataCache:
         data_type: str,
         key_parts: Mapping[str, Any],
         fetch: Callable[[], Awaitable[T]],
+        ttl_seconds: int | None = None,
     ) -> T:
         recorded = await self.get_or_fetch_with_local_delivery(
             data_type=data_type,
             key_parts=key_parts,
             fetch=fetch,
+            ttl_seconds=ttl_seconds,
         )
         return recorded.value
 
@@ -136,6 +161,7 @@ class MarketDataCache:
         key_parts: Mapping[str, Any],
         fetch: Callable[[], Awaitable[T]],
         bind_upstream: Callable[[], Any] | None = None,
+        ttl_seconds: int | None = None,
     ) -> LocalCacheFetchResult:
         if not self.enabled:
             value = await fetch()
@@ -183,7 +209,7 @@ class MarketDataCache:
             "data_type": data_type,
             "key": _json_safe_key(dict(key_parts)),
             "created_at": now,
-            "expires_at": now + self._ttl_for(data_type),
+            "expires_at": now + (int(ttl_seconds) if ttl_seconds is not None else self._ttl_for(data_type)),
             "value": _serialize_value(value),
         }
         self._entries[cache_key] = new_entry
@@ -282,6 +308,11 @@ class CachedMarketDataClient(BaseExchangeClient):
         self.cache = cache
         self.exchange_name = _exchange_name(client)
 
+    def _closed_candle_ttl(self, interval: str) -> int | None:
+        if self.cache.ttl_seconds is not None:
+            return None
+        return closed_higher_timeframe_ttl_seconds(interval, self.cache._now())
+
     async def get_klines(self, symbol: str, interval: str, limit: int) -> Any:
         normalized_symbol = symbol.upper()
         normalized_interval = interval.strip()
@@ -296,6 +327,7 @@ class CachedMarketDataClient(BaseExchangeClient):
                 "params": {},
             },
             fetch=lambda: self.client.get_klines(normalized_symbol, interval, limit),
+            ttl_seconds=self._closed_candle_ttl(normalized_interval),
         )
 
     async def get_klines_with_delivery(
@@ -337,6 +369,7 @@ class CachedMarketDataClient(BaseExchangeClient):
             },
             fetch=fetch,
             bind_upstream=lambda: upstream_box[-1] if upstream_box else None,
+            ttl_seconds=self._closed_candle_ttl(normalized_interval),
         )
         candles = recorded.value
         if not isinstance(candles, Sequence) or isinstance(candles, (str, bytes)):

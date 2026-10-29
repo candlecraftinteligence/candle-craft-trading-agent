@@ -4,7 +4,11 @@ import asyncio
 from decimal import Decimal
 from typing import Any
 
-from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
+from app.cache.market_data_cache import (
+    CachedMarketDataClient,
+    MarketDataCache,
+    closed_higher_timeframe_ttl_seconds,
+)
 
 
 def run(coro: Any) -> Any:
@@ -132,3 +136,26 @@ def test_cache_failures_do_not_poison_future_fetches() -> None:
     assert client.kline_calls == 2
     assert cache.stats()["misses"] == 2
     assert cache.stats()["entries"] == 1
+
+
+def test_closed_higher_timeframe_candles_are_not_refetched_before_the_next_boundary() -> None:
+    opened = 1_700_000_000
+    assert opened % (4 * 60 * 60) != 0
+    clock = {"now": float(opened)}
+    client = CountingPublicClient()
+    cache = MarketDataCache(now=lambda: clock["now"])
+    cached = CachedMarketDataClient(client, cache)
+
+    run(cached.get_klines("BTCUSDT", "4h", 2))
+    clock["now"] += 60
+    run(cached.get_klines("BTCUSDT", "4h", 2))
+    ttl = closed_higher_timeframe_ttl_seconds("4h", float(opened))
+    assert ttl is not None and ttl > 60
+    clock["now"] = float(opened) + ttl
+    run(cached.get_klines("BTCUSDT", "4h", 2))
+
+    assert client.kline_calls == 2
+    run(cached.get_klines("BTCUSDT", "15m", 1))
+    clock["now"] += 61
+    run(cached.get_klines("BTCUSDT", "15m", 1))
+    assert client.kline_calls == 4
