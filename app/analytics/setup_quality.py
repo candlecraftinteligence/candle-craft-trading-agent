@@ -122,6 +122,7 @@ class SetupQualityInput(BaseModel):
     volume_confirmed: bool = False
     late_pullback: bool = False
     htf_2d_trend: str = NA
+    htf_1d_trend: str = NA
     mtf_12h_trend: str = NA
     trend: str = NA
     trust_percentage: MaybeInt = NA
@@ -172,6 +173,7 @@ class SetupQualityInput(BaseModel):
         "bias",
         "confirmation_timeframe",
         "htf_2d_trend",
+        "htf_1d_trend",
         "mtf_12h_trend",
         "trend",
         "funding_status",
@@ -551,7 +553,7 @@ def _alignment_score(data: SetupQualityInput) -> Decimal:
     expected = _expected_trend(data.bias)
     if expected == NA:
         return Decimal("35")
-    trends = [data.htf_2d_trend, data.mtf_12h_trend, data.trend]
+    trends = [data.htf_1d_trend if data.htf_1d_trend != NA else data.htf_2d_trend, data.mtf_12h_trend, data.trend]
     known = [trend for trend in trends if trend != NA and trend != "neutral"]
     if not known:
         return Decimal("45")

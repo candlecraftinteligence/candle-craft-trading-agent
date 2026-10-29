@@ -2059,7 +2059,7 @@ def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "Candle Craft Scanner" in captured.out
     assert "Strategy: Liquidity Grab Pullback" in captured.out
-    assert "Timeframes: 2D → 12H → 15m → 15m" in captured.out
+    assert "Timeframes: 1D → 12H → 4H → 15m → 15m" in captured.out
     assert "🟢 Valid setups: 0" in captured.out
     assert "⚪ Hidden rejected/no-setup symbols: 0" in captured.out
     assert "Phase 12 Scanner Runner" not in captured.out

@@ -66,6 +66,7 @@ SCANNER_CONFIG_ALLOWLIST: Final[tuple[tuple[str, str], ...]] = (
     ("min_score_for_idea", "number"),
     ("min_rr", "number"),
     ("strategy_name", "identifier"),
+    ("strategy_version", "identifier"),
     ("strategy_modes", "identifier_tuple"),
     ("aggressive_toggle", "bool"),
     ("htf_timeframe", "identifier"),
@@ -165,7 +166,8 @@ def collect_run_provenance(
         },
         "versions": {
             "package_version": package,
-            "strategy_version": {"status": "unavailable"},
+            "strategy_version": ({"status": "captured", "value": config_snapshot["strategy_version"]}
+                                 if config_snapshot.get("strategy_version") else {"status": "unavailable"}),
             "strategy_name": strategy_name,
             "configuration_version": {"status": "unavailable"},
             "writer_schema_version": schema_version,

@@ -1043,6 +1043,7 @@ def test_r114_post_migration_integrity_checks_pass(tmp_path: Path) -> None:
 
 def _identity_cli(db_path: Path) -> list[str]:
     return [
+        "--strategy-version", "liquidity-grab-v1", "--htf-timeframe", "2d",
         "--database-path",
         str(db_path),
         "--runtime-epoch-id",

@@ -7,7 +7,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar
@@ -663,6 +663,23 @@ class CachedMarketDataClient(BaseExchangeClient):
                 endpoint="get_long_short_ratio",
             ),
         )
+
+    async def get_price_precision(self, symbol: str) -> Any:
+        # Keep the acquisition timestamp on the immutable object. Do not turn
+        # a disk cache record without provenance into verified precision.
+        from app.data.instrument_precision import InstrumentPrecision
+        method = getattr(self.client, "get_price_precision", None)
+        if not callable(method):
+            return None
+        cache = getattr(self, "_price_precision_cache", {})
+        value = cache.get(symbol)
+        if isinstance(value, InstrumentPrecision) and value.verified_for(self.exchange_name, symbol, datetime.now(UTC)):
+            return value
+        value = await method(symbol)
+        if isinstance(value, InstrumentPrecision):
+            cache[symbol] = value
+            self._price_precision_cache = cache
+        return value
 
     async def get_instrument_metadata(self, symbol: str, *, capture_clock: Callable[[], datetime] | None = None) -> Any:
         from app.data.derivatives_instrument import InstrumentMetadata, unverified_instrument

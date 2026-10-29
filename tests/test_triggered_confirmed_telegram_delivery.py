@@ -477,6 +477,23 @@ def test_mode_projection_change_does_not_resend_equivalent_trigger(
     assert len(sender.messages) == 1
 
 
+def test_strategy_version_metadata_cannot_duplicate_an_owned_public_signal(tmp_path) -> None:
+    db_path = tmp_path / "strategy-version-dedupe.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    first = _public_setup_symbol(signal_id="original-generation")
+    second = _public_setup_symbol(signal_id="selective-generation")
+    diagnostics = dict(second.strategy_diagnostics["swing"])
+    diagnostics.update(strategy_version="selective-fib-mtf-v2", htf_timeframe="1d",
+                       htf_1d_trend="bullish", selective_fib={"selected_ratio": "0.618"})
+    second = second.model_copy(update={"strategy_diagnostics": {"swing": diagnostics}})
+    initial = run(service.deliver_for_run(_run_result(first), scan_run_id="original"))
+    repeated = run(service.deliver_for_run(_run_result(second), scan_run_id="selective"))
+    assert initial.sent == 1 and repeated.sent == 0
+    assert repeated.deliveries[0].status == "duplicate"
+    assert len(sender.messages) == 1
+
+
 def test_mode_specific_lifecycle_ids_collapse_to_one_public_economic_identity() -> None:
     confluence = _public_setup_symbol(
         signal_id="identity-confluence-generation",

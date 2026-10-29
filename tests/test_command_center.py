@@ -231,7 +231,7 @@ def test_command_preset_configuration_defaults() -> None:
     scalp = run_scan.parse_args(["--command-preset", "scalp"])
     override = run_scan.parse_args(["--command-preset", "daily", "--modes", "swing", "--no-continue-watch"])
 
-    assert daily.htf_timeframe == "2d"
+    assert daily.htf_timeframe == "1d"
     assert daily.bias_timeframe == "12h"
     assert daily.execution_timeframe == "15m"
     assert daily.confirmation_timeframe == "15m"

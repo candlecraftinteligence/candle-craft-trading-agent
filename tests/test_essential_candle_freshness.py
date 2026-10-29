@@ -602,6 +602,7 @@ def test_registered_scans_confirm_fresh_evidence_and_a_later_stale_scan_holds_th
     monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", tmp_path / "watch_state.json")
     monkeypatch.setattr(run_scan, "WATCH_STATE_CANONICAL_BASE_DIR", tmp_path)
     argv = [
+        "--strategy-version", "liquidity-grab-v1", "--htf-timeframe", "2d",
         "--symbols",
         "BTCUSDT",
         "--database-path",
@@ -698,6 +699,7 @@ def test_publicly_eligible_fresh_control_sends_and_a_later_stale_scan_does_not(t
     monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", tmp_path / "watch_state.json")
     monkeypatch.setattr(run_scan, "WATCH_STATE_CANONICAL_BASE_DIR", tmp_path)
     argv = [
+        "--strategy-version", "liquidity-grab-v1", "--htf-timeframe", "2d",
         "--symbols",
         "BTCUSDT",
         "--database-path",

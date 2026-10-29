@@ -10,6 +10,7 @@ from app.analytics.pullback_intelligence import PullbackIntelligenceResult, buil
 from app.analytics.setup_quality import SetupQualityResult, SetupQualityState
 from app.analytics.target_intelligence import TargetIntelligenceResult
 from app.core.minimum_rr import hard_mode_minimum_rr
+from app.strategies.context_fields import htf_value, htf_label
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 
@@ -407,6 +408,7 @@ def format_scan_dashboard(
                 "Timeframes: "
                 f"{_timeframe_label(config.htf_timeframe)} {ARROW} "
                 f"{_timeframe_label(config.bias_timeframe)} {ARROW} "
+                f"{_timeframe_label(config.structure_timeframe)} {ARROW} "
                 f"{_timeframe_label(config.execution_timeframe)} {ARROW} "
                 f"{_timeframe_label(config.confirmation_timeframe)}"
             ),
@@ -546,7 +548,7 @@ def format_symbol_card(
         *_historical_edge_lines(symbol_result),
         "",
         f"{PIN} Context",
-        f"{BULLET} 2D HTF: {_title_value(diagnostics.get('htf_2d_trend'))}",
+        f"{BULLET} {htf_label(diagnostics)} HTF: {_title_value(htf_value(diagnostics))}",
         f"{BULLET} 12H Bias: {_title_value(diagnostics.get('mtf_12h_trend'))}",
         f"{BULLET} {_volume_profile_text(symbol_result)}",
         f"{BULLET} {_derivatives_context_text(symbol_result)}",
@@ -1138,7 +1140,7 @@ def _readiness_score(
 ) -> int:
     score = Decimal("0")
     expected_trend = _expected_trend(_setup_bias(diagnostics))
-    score += _trend_alignment_points(diagnostics.get("htf_2d_trend"), expected_trend, Decimal("10"))
+    score += _trend_alignment_points(htf_value(diagnostics), expected_trend, Decimal("10"))
     score += _trend_alignment_points(diagnostics.get("mtf_12h_trend"), expected_trend, Decimal("10"))
 
     if len(progress_items) > 0 and progress_items[0].passed:
@@ -1304,7 +1306,7 @@ def _priority_rank_reason(
 ) -> str:
     return (
         f"{label}: score {score}/100; progress {progress_passed}/{SETUP_PROGRESS_TOTAL}; "
-        f"2D {_title_value(diagnostics.get('htf_2d_trend'))}; "
+        f"{htf_label(diagnostics)} {_title_value(htf_value(diagnostics))}; "
         f"12H {_title_value(diagnostics.get('mtf_12h_trend'))}; "
         f"failed gate {_display(failed_gate)}; next {next_trigger}."
     )
@@ -1527,7 +1529,7 @@ def _execution_summary(diagnostics: Mapping[str, Any]) -> str:
         confirmation_tf = "15m"
     return " | ".join(
         (
-            f"2D HTF {_title_value(diagnostics.get('htf_2d_trend'))}",
+            f"{htf_label(diagnostics)} HTF {_title_value(htf_value(diagnostics))}",
             f"12H Bias {_title_value(diagnostics.get('mtf_12h_trend'))}",
             f"{execution_tf} sweep {_summary_status(diagnostics.get('execution_sweep_status'))}",
             f"{confirmation_tf} BOS/CHoCH {_summary_status(diagnostics.get('confirmation_structure_shift_status'))}",

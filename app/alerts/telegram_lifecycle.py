@@ -6032,7 +6032,7 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
             stop_loss=stop_loss,
         ),
         confluence=_human_confluence_sentence(symbol_result, diagnostics),
-        htf_bias=_first_non_na(diagnostics.get("htf_2d_trend"), diagnostics.get("mtf_12h_trend")),
+        htf_bias=_first_non_na(diagnostics.get("htf_1d_trend") if diagnostics.get("htf_timeframe") == "1d" else diagnostics.get("htf_2d_trend"), diagnostics.get("mtf_12h_trend")),
         ob_fvg_status=_first_non_na(
             diagnostics.get("selected_zone_type"),
             diagnostics.get("ob_fvg_status"),
@@ -6583,6 +6583,8 @@ def _signal_edge_evidence(
         "BOS" if symbol_result.bos_detected and not symbol_result.choch_detected else NA,
     )
     return SignalEdgeEvidence(
+        strategy_version=diagnostics.get("strategy_version", NA),
+        selected_fib_ratio=_field(diagnostics.get("selective_fib"), "selected_ratio"),
         sweep_present=_context_positive(_field(sweep, "is_present")) or _context_any_positive(
             diagnostics,
             "liquidity_sweep_detected",

@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any, Literal
 
+from app.strategies.context_fields import htf_value, htf_label
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display
 from app.formatters.telegram_signal_formatter import (
@@ -525,7 +526,7 @@ def _premium_no_trade_message(
 
 def _symbol_context_bias(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
     trends = (
-        _display(diagnostics.get("htf_2d_trend")),
+        _display(htf_value(diagnostics)),
         _display(diagnostics.get("mtf_12h_trend")),
         symbol_result.trend_context,
     )

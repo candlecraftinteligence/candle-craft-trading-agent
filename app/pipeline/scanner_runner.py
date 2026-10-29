@@ -134,10 +134,14 @@ from app.data.candle_integrity import (
     normalize_utc_timestamp,
     timeframe_duration,
 )
+from app.strategies.context_fields import htf_value
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exceptions import ExchangeTimeoutError
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.data.timeframes import resample_ohlcv_candles
+from app.analytics.selective_fibonacci import LEGACY_VERSION, SELECTIVE_VERSION, StrategyVersion
+from app.data.instrument_precision import InstrumentPrecision
+from app.strategies.selective_timeframes import HIERARCHY
 from app.core.minimum_rr import (
     DEFAULT_CONFIGURED_MINIMUM_RR,
     hard_mode_minimum_rr,
@@ -262,6 +266,7 @@ class ScannerRiskConfig(BaseModel):
 
 
 class ScannerRunConfig(BaseModel):
+    strategy_version: StrategyVersion = SELECTIVE_VERSION
     symbols: tuple[ScannerSymbolConfig, ...]
     exchange: Literal["binance", "bybit"]
     interval: str = "15m"
@@ -281,9 +286,9 @@ class ScannerRunConfig(BaseModel):
     enable_strategy_output: bool = True
     include_formatted_strategy_output: bool = True
     aggressive_toggle: bool = False
-    htf_timeframe: str = "2d"
+    htf_timeframe: str = "1d"
     bias_timeframe: str = "12h"
-    structure_timeframe: str = DEFAULT_STRUCTURE_TIMEFRAME
+    structure_timeframe: str = "4h"
     execution_timeframe: str = "15m"
     confirmation_timeframe: str = DEFAULT_CONFIRMATION_TIMEFRAME
     cache_enabled: bool = True
@@ -323,6 +328,15 @@ class ScannerRunConfig(BaseModel):
     cmc_mode: Literal["off", "collect", "shadow", "decision"] = "off"
 
     model_config = ConfigDict(frozen=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _versioned_timeframe_defaults(cls, value):
+        if isinstance(value, Mapping) and value.get("strategy_version") == LEGACY_VERSION:
+            value = dict(value)
+            value.setdefault("htf_timeframe", "2d")
+            value.setdefault("structure_timeframe", DEFAULT_STRUCTURE_TIMEFRAME)
+        return value
 
     @model_serializer(mode="wrap")
     def _serialize_cmc_mode(self, handler):
@@ -2235,6 +2249,18 @@ class ScannerRunner:
         )
 
         strategy_results: dict[str, LiquidityGrabResult] = {}
+        base_input.update(strategy_version=config.strategy_version, exchange=config.exchange,
+                          decision_timestamp=config.decision_timestamp)
+        if config.strategy_version == SELECTIVE_VERSION:
+            precision = None
+            method = getattr(client, "get_price_precision", None)
+            if callable(method):
+                try:
+                    precision = await self._request_public_api(config, f"{symbol} price precision", lambda: method(symbol))
+                except Exception as exc:
+                    self.logger.debug("Instrument precision unavailable for %s: %s", symbol, exc)
+            if isinstance(precision, InstrumentPrecision) and precision.verified_for(config.exchange, symbol, datetime.now(UTC)):
+                base_input.update(tick_size=precision.tick_size, precision_source=precision.source_endpoint)
         diagnostics: dict[str, Any] = {}
         valid_modes: list[str] = []
         rejected_modes: list[str] = []
@@ -2256,13 +2282,22 @@ class ScannerRunner:
                 result = self.strategy_engine.analyze(strategy_input)
             except Exception as exc:
                 self.logger.warning("Strategy %s failed for symbol=%s mode=%s: %s", config.strategy_name, symbol, mode_name, exc)
-                diagnostics[mode_name] = {"error": str(exc)}
+                diagnostics[mode_name] = {"error": str(exc), "strategy_version": config.strategy_version,
+                                          "htf_timeframe": config.htf_timeframe}
                 rejected_modes.append(mode_name)
                 continue
 
             strategy_results[mode_name] = result
             setup = _strategy_setup_for_mode(result, mode)
+            if setup.strategy_version != config.strategy_version:
+                diagnostics[mode_name] = {"strategy_version": config.strategy_version,
+                                          "first_failed_gate": "strategy_version_mismatch"}
+                rejected_modes.append(mode_name)
+                continue
             mode_diagnostics = _strategy_diagnostics_for_setup(setup)
+            if config.strategy_version == SELECTIVE_VERSION:
+                mode_diagnostics["instrument_precision"] = (
+                    precision.model_dump(mode="json") if isinstance(precision, InstrumentPrecision) else NA)
             mode_diagnostics["required_rr"] = setup.effective_minimum_rr
             pullback_intelligence = build_pullback_intelligence(mode_diagnostics)
             mode_diagnostics["pullback_intelligence"] = pullback_intelligence.model_dump(mode="json")
@@ -2348,7 +2383,7 @@ class ScannerRunner:
         htf_source: str = NA
         daily_source_candles: tuple[Any, ...] = ()
 
-        if config.htf_timeframe.strip().lower() == "2d":
+        if config.strategy_version == LEGACY_VERSION and config.htf_timeframe.strip().lower() == "2d":
             source_candles: Sequence[Any] = ()
             source_delivery: CandleBatchDelivery | None = None
             synthetic_data_error = False
@@ -2482,6 +2517,7 @@ class ScannerRunner:
             deliveries_by_timeframe,
             _unique_strings(missing_data),
             {
+                "htf_1d_context_source": "exchange_closed_1d" if "1d" in candles_by_timeframe else NA,
                 "htf_2d_context_source": htf_source,
                 "timeframe_limit_warnings": _unique_strings(limit_warnings),
                 "essential_candle_freshness": freshness,
@@ -3150,6 +3186,7 @@ def _setup_quality_for_result(
             or _display_decimal_or_text(diagnostics.get("fib_alignment_status")) in ("aligned", "valid", "passed"),
             volume_confirmed="volume_confirmation" in gates_passed,
             late_pullback=failed_gate == "entry_window_expired",
+            htf_1d_trend=_display_decimal_or_text(diagnostics.get("htf_1d_trend")) if diagnostics else NA,
             htf_2d_trend=_display_decimal_or_text(diagnostics.get("htf_2d_trend")) if diagnostics else NA,
             mtf_12h_trend=_display_decimal_or_text(diagnostics.get("mtf_12h_trend")) if diagnostics else NA,
             trend=_display_decimal_or_text(diagnostics.get("trend")) if diagnostics else NA,
@@ -3900,6 +3937,7 @@ def _liquidity_grab_input(
         "structure_candles": candles_by_timeframe.get(structure_timeframe.strip().lower()),
         "structure_analysis_required": True,
         "candles_2d": candles_by_timeframe.get("2d"),
+        "candles_1d": candles_by_timeframe.get("1d"),
         "candles_12h": candles_by_timeframe.get("12h"),
         "candles_4h": candles_by_timeframe.get("4h"),
         "candles_1h": candles_by_timeframe.get("1h"),
@@ -3927,6 +3965,7 @@ def _liquidity_grab_input(
         "min_rr": min_rr,
         "aggressive_toggle": aggressive_toggle,
         "htf_2d_context_source": timeframe_context.get("htf_2d_context_source", NA),
+        "htf_1d_context_source": timeframe_context.get("htf_1d_context_source", NA),
     }
 
 
@@ -4097,7 +4136,7 @@ def _freshness_blocked_strategy_execution(
     missing, unverified = bundle.diagnostic_lines()
     return _StrategyExecution(
         strategy_name=config.strategy_name or NA,
-        strategy_diagnostics={"essential_candle_freshness": bundle.receipt()},
+        strategy_diagnostics={"essential_candle_freshness": bundle.receipt(), "strategy_version": config.strategy_version},
         strategy_missing_data=missing,
         strategy_unverified_data=unverified,
         rejected_strategy_modes=tuple(mode.value for mode in config.strategy_modes),
@@ -4109,6 +4148,8 @@ def _freshness_blocked_strategy_execution(
 
 
 def _direct_strategy_timeframes(config: ScannerRunConfig) -> tuple[str, ...]:
+    if config.strategy_version == SELECTIVE_VERSION:
+        return HIERARCHY[:4]
     timeframes = (
         config.bias_timeframe,
         config.structure_timeframe,
@@ -4135,6 +4176,11 @@ def _strategy_setup_for_mode(result: LiquidityGrabResult, mode: LiquidityGrabMod
 
 def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]:
     return {
+        "strategy_version": setup.strategy_version,
+        "htf_1d_context_source": setup.htf_1d_context_source,
+        "candles_1d_count": setup.candles_1d_count,
+        "htf_1d_trend": setup.htf_1d_trend,
+        "selective_fib": setup.pullback_zone.selective_fib.model_dump(mode="json"),
         "mode": setup.mode.value,
         "is_valid": setup.is_valid,
         "status": setup.status,
@@ -4335,6 +4381,8 @@ def _target_htf_candles(
 
 
 def _is_valid_strategy_setup(setup: LiquidityGrabSetup) -> bool:
+    if setup.strategy_version == SELECTIVE_VERSION and not setup.pullback_zone.selective_fib.execution_eligible:
+        return False
     return setup.is_valid and setup.trust_meter.grade in ("A", "B")
 
 
@@ -4950,7 +4998,7 @@ def _symbol_htf_agrees_with_bias(diagnostics: Mapping[str, Any], bias: str) -> b
     if bias not in ("bullish", "bearish"):
         return False
     trends = (
-        _display_decimal_or_text(diagnostics.get("htf_2d_trend")),
+        _display_decimal_or_text(htf_value(diagnostics)),
         _display_decimal_or_text(diagnostics.get("mtf_12h_trend")),
     )
     evaluated = [trend for trend in trends if trend in ("bullish", "bearish")]
@@ -4962,7 +5010,7 @@ def _symbol_htf_conflicts_with_bias(diagnostics: Mapping[str, Any], bias: str) -
         return False
     opposite = "bearish" if bias == "bullish" else "bullish"
     trends = (
-        _display_decimal_or_text(diagnostics.get("htf_2d_trend")),
+        _display_decimal_or_text(htf_value(diagnostics)),
         _display_decimal_or_text(diagnostics.get("mtf_12h_trend")),
     )
     return any(trend == opposite for trend in trends)
@@ -5271,7 +5319,7 @@ def _symbol_representative_diagnostics(result: ScannerSymbolResult) -> Mapping[s
 
 def _symbol_context_bias(result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
     trends = (
-        _display_decimal_or_text(diagnostics.get("htf_2d_trend")),
+        _display_decimal_or_text(htf_value(diagnostics)),
         _display_decimal_or_text(diagnostics.get("mtf_12h_trend")),
         result.trend_context,
     )

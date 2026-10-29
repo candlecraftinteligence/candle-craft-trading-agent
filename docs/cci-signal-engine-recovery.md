@@ -73,3 +73,30 @@ CMC normalization and U100 identity/boundary checks, three consecutive startup
 outages with continuous owned-plan monitoring, automatic discovery recovery,
 source cleanup/cancellation, watch scheduling, and CMC client/storage safety.
 `compileall` for changed production modules and `git diff --check` passed.
+
+## Strategy integration (group B)
+
+Prospective scanner defaults use `selective-fib-mtf-v2` with native closed
+1D / 12H / 4H / 15M candles. The execution and confirmation roles share the
+same 15M source. The legacy strategy engine and historical replay retain
+their 2D / 2H defaults; daily evidence is never relabelled as synthetic 2D.
+
+PR #152's precision, native-daily context, provenance, formatter and regression
+changes were applied selectively onto the current base. Its deep-level policy
+was adapted: all three levels are independently evaluated, and all require an
+actual post-BOS contact followed by a closed directional reaction, confirmed
+structure and the existing canonical sweep/momentum confirmation. There is no
+extra two-body requirement. A wick touch alone is not confirmation or a fill.
+Body acceptance beyond 0.786 and structural breakdown remain rejected.
+
+Zone freshness is checked before the first contact, using the existing OB/FVG
+freshness calculations. The evidence also retains freshness at decision time,
+so the confirming touch cannot retroactively disqualify its own previously
+fresh zone. Prior consumed zones remain blocked. Ticker prices are not inserted
+as synthetic closed bodies in the prospective wick/body assessment.
+
+Focused strategy, legacy, candle-freshness, RR and fake-delivery regressions:
+**327 passed in 214.06 seconds**. Final Fibonacci/CLI/command-center checks:
+**153 passed in 21.52 seconds**. These runs overlap and must not be summed.
+Full `compileall`, `pip check` and `git diff --check` passed. Exact-head full-suite,
+end-to-end product verification and CI are still pending.

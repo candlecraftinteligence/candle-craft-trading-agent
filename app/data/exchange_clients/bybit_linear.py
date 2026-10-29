@@ -244,6 +244,12 @@ class BybitLinearClient(PublicHTTPExchangeClient):
         )
         return represent_delivery(value, evidence)
 
+    async def get_price_precision(self, symbol: str):
+        from app.data.instrument_precision import parse_precision
+        payload = await self._get_json(ENDPOINT_BYBIT_INSTRUMENT,
+            params={"category": self.CATEGORY, "symbol": symbol.upper()}, validate=self._ensure_success)
+        return parse_precision(payload, exchange="bybit", symbol=symbol.upper())
+
     async def get_instrument_metadata(
         self,
         symbol: str,
