@@ -13,7 +13,7 @@ import pytest
 import websockets
 
 from app.analytics.market_regime import default_market_regime_result
-from app.core.phase_profile import PhaseProfile
+from app.core.phase_profile import PhaseProfile, current_observations
 from app.data.dtos import NA
 from app.lifecycle.eligibility import has_valid_trade_map, public_watchlist_eligible
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
@@ -647,16 +647,43 @@ def test_transaction_outcomes_and_closure_truthfulness(
 
 
 def test_watch_phase_profile_explicit_composition() -> None:
-    """WatchPhaseProfile composes scan_storage telemetry without mutating PhaseProfile.snapshot."""
+    """WatchPhaseProfile direct construction composes scan_storage telemetry with full snapshot parity."""
     worker = LifecycleWorker()
     try:
         profile = run_scan.WatchPhaseProfile()
+        assert type(profile) is run_scan.WatchPhaseProfile
         assert isinstance(profile, PhaseProfile)
         assert "snapshot" not in profile.__dict__
+
+        # Snapshot key parity against standard PhaseProfile
+        base_profile = PhaseProfile()
+        base_snap = base_profile.snapshot(boundary="parity_boundary")
+        watch_snap = profile.snapshot(boundary="parity_boundary")
+        for key in ("contract", "boundary", "elapsed_seconds", "phases"):
+            assert key in watch_snap
+            assert key in base_snap
+
+        # Loop-lag binding parity
+        loop_lag = LoopLagMonitor()
+        profile.loop_lag = loop_lag
+        loop_lag.bind(profile)
+        watch_snap_lag = profile.snapshot(boundary="parity_boundary")
+        assert "event_loop" in watch_snap_lag
+
+        # Context activation parity
+        assert current_observations(boundary="inactive") == {}
+        with profile.activate() as active:
+            assert active is profile
+            active_obs = current_observations(boundary="active")
+            assert "phase_profile" in active_obs
+        assert current_observations(boundary="inactive") == {}
+
+        # Additive scan_storage telemetry composition when worker is attached
         profile.lifecycle_worker = worker
         snap = profile.snapshot(boundary="test_composition")
         assert "scan_storage_isolation" in snap
         assert snap["scan_storage_isolation"]["contract"] == "cci-scan-storage-isolation-v1"
+        assert snap["scan_storage_isolation"]["worker"] == "cci-p0b1-lifecycle"
     finally:
         asyncio.run(worker.aclose())
 

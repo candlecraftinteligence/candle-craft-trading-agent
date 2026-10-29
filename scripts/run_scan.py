@@ -92,7 +92,7 @@ from app.alerts.telegram_lifecycle import (  # noqa: E402
 from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa: E402
 from app.alerts.provenance_diagnostics import summary_provenance, unavailable_provenance  # noqa: E402
 from app.watch_session import WatchSession, append_session_observation  # noqa: E402
-from app.core.phase_profile import PhaseProfile, current_observations, profiled, suspend_phase_profile  # noqa: E402
+from app.core.phase_profile import PhaseProfile, PhaseProfile as _CorePhaseProfile, current_observations, profiled, suspend_phase_profile  # noqa: E402
 from app.runtime.disk_isolation import SerializedDiskWorker  # noqa: E402
 from app.runtime.loop_lag import LoopLagMonitor  # noqa: E402
 from app.runtime.lifecycle_isolation import LifecycleWorker  # noqa: E402
@@ -3657,8 +3657,7 @@ async def _run_watch_mode(
             previous_state = state
             prior_failure_streak = failure_streak
             iteration_in_progress = True
-            profile = PhaseProfile()
-            profile.__class__ = WatchPhaseProfile
+            profile = WatchPhaseProfile()
             profile.loop_lag = loop_lag
             profile.disk_worker = disk_worker
             profile.lifecycle_worker = lifecycle_worker
@@ -4777,6 +4776,16 @@ async def _run_watch_scan_iteration(
 
 class WatchPhaseProfile(PhaseProfile):
     """Watch-mode phase profile composing loop-lag, disk, lifecycle, and scan_storage telemetry."""
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        if clock is None and PhaseProfile is not _CorePhaseProfile:
+            try:
+                candidate = PhaseProfile()
+                if isinstance(candidate, _CorePhaseProfile) and hasattr(candidate, "_clock"):
+                    clock = candidate._clock
+            except Exception:
+                pass
+        super().__init__(clock=clock)
 
     def snapshot(self, *, boundary: str) -> dict[str, Any]:
         report = super().snapshot(boundary=boundary)
