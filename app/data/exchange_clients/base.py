@@ -132,10 +132,17 @@ class PublicHTTPExchangeClient(BaseExchangeClient):
                     body.extend(chunk)
                     if len(body) > self._max_response_bytes:
                         raise ExchangeResponseError("public exchange response exceeds byte budget")
-                response = httpx.Response(upstream.status_code, headers=upstream.headers,
+                # aiter_bytes() has already decoded Content-Encoding. Reusing
+                # wire headers would decode the body again and misstate its size.
+                headers = httpx.Headers(upstream.headers)
+                headers.pop("Content-Encoding", None)
+                headers.pop("Content-Length", None)
+                response = httpx.Response(upstream.status_code, headers=headers,
                                           content=bytes(body), request=upstream.request)
         except httpx.TimeoutException as exc:
             raise ExchangeTimeoutError(f"{self.exchange_name} request timed out: {path}") from exc
+        except httpx.DecodingError as exc:
+            raise ExchangeResponseError(f"{self.exchange_name} invalid content encoding: {path}") from exc
         except httpx.TransportError as exc:
             raise ExchangeNetworkError(f"{self.exchange_name} request failed: {path}") from exc
 
