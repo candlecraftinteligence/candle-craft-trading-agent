@@ -71,7 +71,18 @@ def parse_binance_liquidation(
     if payload.get("e") != "forceOrder":
         raise LiquidationPayloadError("payload is not a forceOrder event")
 
-    stream_type = _int(payload, "st")
+    order = payload.get("o")
+    if not isinstance(order, Mapping):
+        raise LiquidationPayloadError("forceOrder order object o is missing")
+
+    # Current public frames carry identity inside o; retain the event-level
+    # form too, but never choose between contradictory contract identities.
+    for identity in (payload, order):
+        if "st" in identity and type(identity["st"]) not in (int, str):
+            raise LiquidationPayloadError("forceOrder st must be an integer")
+    stream_type = _int(order if "st" in order else payload, "st")
+    if "st" in order and "st" in payload and _int(payload, "st") != stream_type:
+        raise LiquidationPayloadError("forceOrder conflicting st identity fields")
     if stream_type == CM_STREAM_TYPE:
         raise WrongLiquidationContractTypeError(
             "COIN-M forceOrder payload st=2 is not valid for CCI USDⓈ-M liquidation flow"
@@ -81,12 +92,10 @@ def parse_binance_liquidation(
             f"unsupported forceOrder stream type st={stream_type}"
         )
 
-    order = payload.get("o")
-    if not isinstance(order, Mapping):
-        raise LiquidationPayloadError("forceOrder order object o is missing")
-
     symbol = _text(order, "s").upper()
-    pair_symbol = _text(payload, "ps").upper()
+    pair_symbol = _text(order if "ps" in order else payload, "ps").upper()
+    if "ps" in order and "ps" in payload and _text(payload, "ps").upper() != pair_symbol:
+        raise LiquidationPayloadError("forceOrder conflicting ps identity fields")
     order_side = _text(order, "S").upper()
     if order_side == "SELL":
         liquidated_side = LiquidatedPositionSide.LONG
