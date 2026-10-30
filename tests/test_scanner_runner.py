@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -833,12 +834,40 @@ def test_request_timeout_marks_symbol_scan_error() -> None:
     assert result.runtime_stats.timeout_count == 1
 
 
-def test_symbol_timeout_marks_symbol_scan_error_and_continues() -> None:
+def test_symbol_timeout_marks_symbol_scan_error_and_continues(monkeypatch) -> None:
+    # Host scheduling/analysis cost is not an exchange delay. Drive the runner
+    # and asyncio deadline clocks together so only the deliberately slow symbol
+    # consumes its 0.2-second budget, even on a loaded Windows host.
+    elapsed = 1000.0
+    slow_started = False
+    cancelled_requests: list[tuple[str, str]] = []
+    cancelled_symbols: list[str] = []
+    original_time_module = scanner_runner_module.time
+
+    def monotonic() -> float:
+        return elapsed
+
     class OneSlowSymbolClient(FakeExchangeClient):
         async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Decimal | int]]:
+            nonlocal elapsed, slow_started
             if symbol == "SLOWUSDT":
-                await asyncio.sleep(0.3)
+                if not slow_started:
+                    slow_started = True
+                    elapsed += 0.3
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled_requests.append((symbol, interval))
+                    raise
             return await super().get_klines(symbol, interval, limit)
+
+    class CancellationRecordingRunner(ScannerRunner):
+        async def _scan_symbol(self, symbol_config, *args, **kwargs):
+            try:
+                return await super()._scan_symbol(symbol_config, *args, **kwargs)
+            except asyncio.CancelledError:
+                cancelled_symbols.append(symbol_config.symbol)
+                raise
 
     client = OneSlowSymbolClient(
         {
@@ -848,12 +877,24 @@ def test_symbol_timeout_marks_symbol_scan_error_and_continues() -> None:
         failing_timeframes={"2d"},
     )
 
-    result = run(
-        ScannerRunner(exchange_client=client).run(
-            _config(["SLOWUSDT", "BTCUSDT"], request_timeout_sec=1, symbol_timeout_sec=0.2)
-        )
-    )
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        # Patch this loop and the runner's time binding, not the shared stdlib
+        # clock. Restore both before asyncio.run performs loop shutdown.
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(loop, "time", monotonic)
+            clock_patch.setattr(scanner_runner_module, "time", SimpleNamespace(monotonic=monotonic))
+            return await CancellationRecordingRunner(exchange_client=client).run(
+                _config(["SLOWUSDT", "BTCUSDT"], request_timeout_sec=1, symbol_timeout_sec=0.2)
+            )
 
+    result = run(exercise())
+
+    assert slow_started is True
+    assert cancelled_symbols == ["SLOWUSDT"]
+    assert cancelled_requests
+    assert all(symbol == "SLOWUSDT" for symbol, _interval in cancelled_requests)
+    assert scanner_runner_module.time is original_time_module
     assert result.scanned_symbols == 2
     assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
     assert "symbol timeout exceeded after 0.2 seconds" in str(result.results[0].error_message)

@@ -88,6 +88,9 @@ Expected response:
 
 ## Database
 
+For an isolated scanner/listener generation, see the supported
+[`--runtime-state-root` storage contract](docs/operations/runtime_state_root.md).
+
 The SQLAlchemy models are in `app/models`. Alembic is configured to read `DATABASE_URL` through the app settings loader.
 
 Create a migration after model changes:
