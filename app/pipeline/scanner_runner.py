@@ -328,6 +328,10 @@ class ScannerRunConfig(BaseModel):
     order_book_liquidity_bootstrap_concurrency: int = 2
     order_book_liquidity_event_buffer_size: int = 256
     decision_timestamp: datetime | None = None
+    # Run-local acquisition evidence; never accepted from CLI or serialized as config.
+    price_precision_snapshot: dict[str, InstrumentPrecision | None] | None = Field(
+        default=None, exclude=True, repr=False,
+    )
     derivatives_source_truth_shadow: bool = False
     cmc_mode: Literal["off", "collect", "shadow", "decision"] = "off"
 
@@ -988,8 +992,20 @@ class ScannerRunner:
         try:
             if implicit_decision_clock and run_config.strategy_version == SELECTIVE_VERSION and run_config.enable_strategy_output:
                 underlying = client.client if isinstance(client, CachedMarketDataClient) else client
+                snapshot_method = getattr(underlying, "get_price_precision_snapshot", None)
                 bulk_metadata = getattr(underlying, "get_exchange_info", None)
-                if callable(bulk_metadata):
+                if callable(snapshot_method):
+                    symbols = tuple(item.symbol for item in run_config.symbols)
+                    try:
+                        snapshot = await self._request_public_api(
+                            run_config, "shared instrument precision",
+                            lambda: snapshot_method(symbols),
+                        )
+                    except Exception as exc:
+                        self.logger.debug("Instrument precision unavailable: %s", type(exc).__name__)
+                        snapshot = {symbol: None for symbol in symbols}
+                    run_config = run_config.model_copy(update={"price_precision_snapshot": snapshot})
+                elif callable(bulk_metadata):
                     try:
                         await self._request_public_api(run_config, "shared instrument metadata", bulk_metadata)
                     except Exception as exc:
@@ -2283,12 +2299,17 @@ class ScannerRunner:
             base_input["spread"] = observed_spread(order_book_liquidity, symbol=symbol,
                 cutoff=config.decision_timestamp, stale_seconds=config.order_book_liquidity_stale_sec)
             precision = None
-            method = getattr(client, "get_price_precision", None)
-            if callable(method):
-                try:
-                    precision = await self._request_public_api(config, f"{symbol} price precision", lambda: method(symbol))
-                except Exception as exc:
-                    self.logger.debug("Instrument precision unavailable for %s: %s", symbol, exc)
+            if config.price_precision_snapshot is not None:
+                # A later cache refresh cannot replace evidence acquired before
+                # this scan's fixed decision time, including failed acquisition.
+                precision = config.price_precision_snapshot.get(symbol)
+            else:
+                method = getattr(client, "get_price_precision", None)
+                if callable(method):
+                    try:
+                        precision = await self._request_public_api(config, f"{symbol} price precision", lambda: method(symbol))
+                    except Exception as exc:
+                        self.logger.debug("Instrument precision unavailable for %s: %s", symbol, exc)
             if isinstance(precision, InstrumentPrecision) and precision.verified_for(config.exchange, symbol, config.decision_timestamp):
                 base_input.update(tick_size=precision.tick_size, precision_source=precision.source_endpoint)
         diagnostics: dict[str, Any] = {}

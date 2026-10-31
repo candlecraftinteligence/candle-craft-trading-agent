@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import asyncio
 import copy
 import time
@@ -322,6 +322,26 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
             endpoint=ENDPOINT_BINANCE_ACCOUNT_RATIO,
         )
         return represent_delivery(value, evidence)
+
+    async def get_price_precision_snapshot(self, symbols: Sequence[str]):
+        """Freeze one acquired exchange-info response for a scanner decision."""
+        from app.data.instrument_precision import parse_precision
+
+        payload, acquired = await self._exchange_info()
+        if acquired.acquired_at is None:
+            raise ValueError("precision_acquisition_unverified")
+        snapshot = {}
+        for symbol in symbols:
+            try:
+                snapshot[symbol] = parse_precision(
+                    payload, exchange="binance", symbol=symbol,
+                    received_at=acquired.acquired_at,
+                )
+            except (ValueError, ArithmeticError, TypeError):
+                # One malformed or absent contract must not authorize precision
+                # or discard the other independently verified instruments.
+                snapshot[symbol] = None
+        return snapshot
 
     async def get_price_precision(self, symbol: str):
         from app.data.instrument_precision import parse_precision
