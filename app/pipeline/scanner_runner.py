@@ -1359,12 +1359,12 @@ class ScannerRunner:
             limit_warnings: list[str] = []
             fetch_limit = _timeframe_fetch_limit(config, timeframe, limit_warnings)
             try:
-                candles = await self._request_public_api(
-                    config,
+                delivery = await self._request_klines_delivery(
+                    client, config, "BTCUSDT", timeframe, fetch_limit,
                     f"BTCUSDT {timeframe} candles for global context",
-                    lambda: client.get_klines("BTCUSDT", timeframe, fetch_limit),
                     timeout_sec=_optional_request_timeout(config),
                 )
+                candles = delivery.returned_sequence
                 closed = self._closed_candles_for_analysis(
                     candles,
                     symbol="BTCUSDT",
@@ -2118,12 +2118,12 @@ class ScannerRunner:
         }
         for symbol, key in (("BTCUSDT", "btc_candles"), ("ETHUSDT", "eth_candles")):
             try:
-                candles = await self._request_public_api(
-                    config,
+                delivery = await self._request_klines_delivery(
+                    client, config, symbol, timeframe, fetch_limit,
                     f"{symbol} {timeframe} candles for market climate",
-                    lambda symbol=symbol: client.get_klines(symbol, timeframe, fetch_limit),
                     timeout_sec=_optional_request_timeout(config),
                 )
+                candles = delivery.returned_sequence
                 closed = self._closed_candles_for_analysis(
                     candles,
                     symbol=symbol,

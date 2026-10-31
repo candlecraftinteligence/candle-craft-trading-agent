@@ -20,6 +20,21 @@ Tests exercise actual synthetic LONG and SHORT scanner/risk plans, two-cycle
 lifecycle confirmation, persistence and fake transport with deduplication at
 all three Fibonacci targets. Synthetic outcomes are not production evidence.
 
+## Cached BTC lifecycle provenance
+
+Runtime also showed BTC lifecycle admission blocked with
+producer_observed_at_missing. The BTC context warm-up used legacy get_klines,
+which populated the shared candle cache without retaining adapter acquisition
+evidence. The later valid BTC strategy result could therefore not obtain
+lifecycle origin. A real synthetic scanner reproduced a risk-approved plan
+with missing producer provenance.
+
+BTC context and market-climate warm-up now use the existing evidence-carrying
+candle-delivery path. Values, freshness checks and request sharing are
+preserved; cache hits retain the original acquisition instead of fabricating
+a timestamp. Added cases exercise warm shared context and both directions
+through actual lifecycle and fake delivery, with all origin guards intact.
+
 ## Storage correction on the existing codec
 
 Runtime PID 13452 explicitly inherited SCAN_RAW_PAYLOAD_INLINE_ONLY=true.

@@ -9,6 +9,8 @@ import pytest
 import app.data.exchange_clients.binance_futures as binance_module
 from app.alerts.telegram_lifecycle import TelegramLifecycleDeliveryService
 from app.data.exchange_clients import BinanceFuturesClient
+from app.cache.market_data_cache import MarketDataCache
+from app.runtime_epoch.origin import producer_acquisition_from_symbol_result
 from app.lifecycle.service import apply_lifecycle_to_run_result
 from app.pipeline.scanner_runner import ScannerRunner
 from app.storage.repositories import store_scan_result
@@ -22,7 +24,7 @@ from tests.test_triggered_confirmed_telegram_delivery import FakeSender, _settin
 pytestmark = pytest.mark.no_auto_epoch
 
 
-def _scan(monkeypatch, direction, ratio, *, next_bar=False, invalid=None):
+def _scan(monkeypatch, direction, ratio, *, next_bar=False, invalid=None, warm_context=False):
     now = [AT - timedelta(seconds=1)]
     monkeypatch.setattr(binance_module, "default_capture_clock", lambda: now[0])
 
@@ -65,33 +67,40 @@ def _scan(monkeypatch, direction, ratio, *, next_bar=False, invalid=None):
     now[0] = client.as_of - timedelta(seconds=1)
     config = _config(
         ["BTCUSDT"], strategy_version="selective-fib-mtf-v2", htf_timeframe="1d",
-        structure_timeframe="4h", global_context_enabled=False, decision_timestamp=None,
+        structure_timeframe="4h", global_context_enabled=warm_context, decision_timestamp=None,
+        btc_d_context_enabled=False, macro_event_context_enabled=False,
     )
+
+    cache = MarketDataCache(enabled=True, now=lambda: client.as_of.timestamp()) if warm_context else None
 
     async def scan():
         try:
             return await ScannerRunner(
-                exchange_client=client, clock=lambda: client.as_of,
+                exchange_client=client, market_data_cache=cache, clock=lambda: client.as_of,
                 capture_clock=lambda: now[0],
             ).run(config)
         finally:
             await client.http.aclose()
+            if cache is not None:
+                await cache.aclose()
 
     return asyncio.run(scan()), client
 
 
+@pytest.mark.parametrize("warm_context", [False, True])
 @pytest.mark.parametrize("direction", ["long", "short"])
 @pytest.mark.parametrize("ratio", [D(".618"), D(".750"), D(".786")])
 def test_refresh_during_real_scan_preserves_plan_risk_lifecycle_and_fake_delivery(
-    tmp_path, monkeypatch, direction, ratio,
+    tmp_path, monkeypatch, direction, ratio, warm_context,
 ):
     db = bootstrap_operational_test_database(tmp_path / "precision-product.db")
     sender = FakeSender()
     for index, next_bar in enumerate((False, True)):
-        result, client = _scan(monkeypatch, direction, ratio, next_bar=next_bar)
+        result, client = _scan(monkeypatch, direction, ratio, next_bar=next_bar, warm_context=warm_context)
         symbol = result.results[0]
         assert symbol.trade_idea is not None
         assert symbol.risk_decision.approved
+        assert producer_acquisition_from_symbol_result(symbol) is not None
         assert client.precision_lookups == 0  # no post-cutoff precision request
         assert client.exchange_info_requests == 2  # preload plus optional metadata refresh
         assert "price_precision_snapshot" not in result.config.model_dump()
