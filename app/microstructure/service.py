@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from app.context.models import ContextStatus
 from app.microstructure.reconnect import FeedRecovery, close_connection
+from app.microstructure.stream_evidence import StreamEvidence
 from app.microstructure.websocket_protocol import is_control_message as _is_control_message
 from app.microstructure.websocket_protocol import matches_usdt_perpetual, UnverifiedPayloadError
 from app.microstructure.agg_trade import (
@@ -122,6 +123,7 @@ class MicrostructureFlowService:
         self.reconnect_max_seconds = float(reconnect_max_seconds)
         self.allow_legacy_missing_stream_type = bool(allow_legacy_missing_stream_type)
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.evidence = StreamEvidence(self.clock)
         self.sleep = sleep or asyncio.sleep
         self.logger = log or logger
         self._lifecycle_lock = asyncio.Lock()
@@ -183,6 +185,7 @@ class MicrostructureFlowService:
                 self._recovery.stopped()
 
     def _invalidate_stream(self) -> None:
+        self.evidence.reset()
         self._connection = None
         self._active_symbols.clear()
         for aggregator in self._aggregators.values():
@@ -192,6 +195,7 @@ class MicrostructureFlowService:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
         requested.add(BTC_FLOW_SYMBOL)
         selected, overflow = _bounded_symbols(requested, maximum=self.max_symbols)
+        self.evidence.retain(selected)
         overflow_reason = f"subscription_limit_exceeded:max_symbols={self.max_symbols}"
         async with self._state_lock:
             previous = set(self._desired_symbols)
@@ -228,6 +232,9 @@ class MicrostructureFlowService:
 
     def snapshot(self, symbol: str) -> MicrostructureFlowSnapshot:
         normalized = _normalize_symbol(symbol)
+        reason = self.evidence.identity_reason(normalized)
+        if reason:
+            return MicrostructureFlowSnapshot.unavailable(symbol=normalized, reason=reason, status=ContextStatus.UNVERIFIED)
         overflow_reason = self._overflow_symbols.get(normalized)
         if overflow_reason is not None:
             return MicrostructureFlowSnapshot.unavailable(
@@ -254,11 +261,14 @@ class MicrostructureFlowService:
 
     def health(self) -> dict[str, Any]:
         return {
+            **self.evidence.health(self._desired_symbols),
             **self._recovery.health(),
             "running": self.running,
             "connected": self._connection is not None,
             "desired_symbol_count": len(self._desired_symbols),
-            "active_symbol_count": len(self._active_symbols),
+            "subscription_requested_symbol_count": len(self._active_symbols),
+            "active_symbol_count": len(self.evidence.acknowledged),
+            "subscription_confirmed": bool(self._desired_symbols and self._desired_symbols <= self.evidence.acknowledged),
             "overflow_symbol_count": len(self._overflow_symbols),
             "connection_count": self._connection_count,
             "disconnect_count": self._disconnect_count,
@@ -323,6 +333,7 @@ class MicrostructureFlowService:
 
     def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
         if _is_control_message(payload):
+            self.evidence.control(payload)
             self._ignored_message_count += 1
             return False
         try:
@@ -337,7 +348,7 @@ class MicrostructureFlowService:
             self._malformed_event_count += 1
             self._reject_unverified_payload()
             return False
-        if not matches_usdt_perpetual(event.symbol):
+        if not self.evidence.matches(event.symbol):
             self._wrong_contract_event_count += 1
             return False
         aggregator = self._aggregators.get(event.symbol)
@@ -345,6 +356,7 @@ class MicrostructureFlowService:
             self._ignored_message_count += 1
             return False
         accepted = aggregator.ingest(event)
+        self.evidence.decoded(event.symbol, event.event_time, accepted=accepted)
         return accepted and 0 <= (self.clock() - event.event_time).total_seconds() <= self.stale_after_seconds
 
     async def _send_subscription_diff(
@@ -366,6 +378,7 @@ class MicrostructureFlowService:
 
     def _subscription_message(self, method: str, symbols: set[str]) -> str:
         self._request_id += 1
+        self.evidence.requested(self._request_id, method, symbols)
         return json.dumps(
             {
                 "method": method,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from collections import Counter
 
 from app.analytics.derivatives_source_truth import evaluate_derivatives_source_truth, observation_context_freshness
 from app.cmc.models import stable_id, utc
@@ -36,6 +37,23 @@ def assess_native_context(*, evidence, instrument, strategy_cutoff, observed_at)
             account_ratio=evidence.get("long_short_ratio"))
     strategy = evaluate(strategy_cutoff)
     observed = evaluate(observed_at)
+    metrics = _context_metrics(observed, evidence)
+    context = {"policy_version": "native-supporting-context-v1",
+        "strategy_cutoff": strategy_cutoff.isoformat() if strategy_cutoff else NA,
+        "observed_at": observed_at.isoformat() if observed_at else NA,
+        "usage": "supporting_context", "validated_confirmation": False,
+        "metrics": metrics, "strategy_inputs": _context_metrics(strategy, evidence),
+        "funding_cadence": {"interval_ms": getattr(instrument, "funding_interval_ms", None),
+            "source": getattr(instrument, "funding_cadence_source", None),
+            "acquired_at": getattr(instrument, "funding_cadence_acquired_at", None).isoformat()
+                if getattr(instrument, "funding_cadence_acquired_at", None) else None},
+        "oi_interval": observed.oi_interval_label,
+        "limitation": "Optional context cannot replace price structure or entry confirmation."}
+    context["source_ref"] = stable_id(context)
+    return strategy, context
+
+
+def _context_metrics(observed, evidence):
     metrics = {}
     for name, value, selected, excluded, slots in (
         ("funding_rate", observed.funding_rate, ("selected_funding",), "excluded_funding", ("funding_rate", "funding_history")),
@@ -48,24 +66,28 @@ def assess_native_context(*, evidence, instrument, strategy_cutoff, observed_at)
         current, freshness_reasons = _current_metric(observed, name, facts)
         reasons = tuple(dict.fromkeys((*reasons, *freshness_reasons)))
         missing = all(not getattr(evidence.get(slot), "observations", ()) for slot in slots)
+        if missing:
+            reasons = tuple(dict.fromkeys((*reasons, *(code for slot in slots
+                for code in getattr(evidence.get(slot), "reason_codes", ()))))) or ("source_not_available",)
         # Selected roles are the evaluator's admission decision. Informational
         # lineage notes (e.g. request-category provenance) are not blockers.
         admitted = current and value != NA and {fact.role for fact in facts} == set(selected)
+        if not admitted and not reasons:
+            reasons = tuple(observed.reason_codes) or ("no_observation_admitted_for_metric",)
         status = "VERIFIED" if admitted else "MISSING" if missing else "STALE" if any("stale" in code for code in reasons) else "UNVERIFIED"
         metrics[name] = {"status": status, "value": value if admitted else NA,
             "sources": [{"exchange": fact.exchange, "symbol": fact.requested_symbol,
                 "endpoint": fact.endpoint, "field": fact.raw_field, "unit": fact.unit,
                 "counting_convention": fact.counting_convention, "source_at": fact.metric_time,
                 "acquired_at": fact.acquired_at, "delivered_at": fact.cache_delivered_at} for fact in facts],
+            "withheld_sources": [{"exchange": fact.exchange, "symbol": fact.requested_symbol,
+                "endpoint": fact.endpoint, "field": fact.raw_field, "source_at": fact.metric_time,
+                "acquired_at": fact.acquired_at, "delivered_at": fact.cache_delivered_at,
+                "reasons": fact.reason_codes} for fact in sorted(rejected, key=lambda fact: fact.metric_time or "", reverse=True)[:16]],
+            "withheld_observation_count": len(rejected), "withheld_sources_truncated": len(rejected) > 16,
+            "withheld_reason_counts": dict(Counter(code for fact in rejected for code in fact.reason_codes)),
             "reasons": reasons[:8]}
-    context = {"policy_version": "native-supporting-context-v1",
-        "strategy_cutoff": strategy_cutoff.isoformat() if strategy_cutoff else NA,
-        "observed_at": observed_at.isoformat() if observed_at else NA,
-        "usage": "supporting_context", "validated_confirmation": False,
-        "metrics": metrics, "oi_interval": observed.oi_interval_label,
-        "limitation": "Optional context cannot replace price structure or entry confirmation."}
-    context["source_ref"] = stable_id(context)
-    return strategy, context
+    return metrics
 
 
 def admitted_strategy_values(assessment):

@@ -12,6 +12,7 @@ from app.data.candle_integrity import normalize_utc_timestamp
 
 class ContextStatus(str, Enum):
     VERIFIED = "VERIFIED"
+    UNVERIFIED = "UNVERIFIED"
     STALE = "STALE"
     UNAVAILABLE = "UNAVAILABLE"
     ERROR = "ERROR"

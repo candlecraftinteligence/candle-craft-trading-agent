@@ -646,6 +646,10 @@ def _evaluate(
     elif funding_obs is not None:
         funding_label = "unverified"
     cadence = instrument.funding_interval_ms if instrument is not None else None
+    cadence_at = getattr(instrument, "funding_cadence_acquired_at", None)
+    if cadence_at is not None and (cutoff is None or cadence_at > cutoff or (cutoff-cadence_at).total_seconds() > 300):
+        cadence = None
+        reasons.append("funding_cadence_not_visible_or_stale")
     if funding_obs is not None and cadence is None:
         reasons.append("funding_cadence_unknown")
     funding_fresh = False
@@ -970,7 +974,7 @@ def _select_funding(
     if _funding_conflict(local):
         marks = (*foreign_marks, *((id(item), ("duplicate_conflict",)) for item in local))
         return _EvidenceChoice(None, ("duplicate_conflict",), marks)
-    if _observation_provenance_conflict(local):
+    if _funding_provenance_conflict(local):
         marks = (*foreign_marks, *((id(item), ("conflicting_provenance",)) for item in local))
         return _EvidenceChoice(None, ("conflicting_provenance",), marks)
     chosen = sorted(local, key=_funding_sort)[0]
@@ -1312,6 +1316,23 @@ def _observation_provenance_conflict(observations: Sequence[DerivativesObservati
     if len({item.response_time.at for item in observations}) > 1:
         return True
     return False
+
+
+def _funding_provenance_conflict(observations: Sequence[DerivativesObservation]) -> bool:
+    """Independent reads of the same settled event may have different receipt times.
+
+    Candidate validation has already checked each read's causal chronology and
+    subtype. Source identity, settlement time and measurement semantics must
+    still agree; this exception does not apply to live OI or account ratios.
+    """
+    signatures = {
+        (item.exchange, item.endpoint, item.identity, item.metric_time,
+         item.rate_kind, item.subtype_declarations,
+         tuple((q.raw_field, q.unit, q.counting_convention, q.unit_asset)
+               for q in item.quantities))
+        for item in observations
+    }
+    return len(signatures) > 1
 
 
 def _cache_chronology(batch: DerivativesEvidenceBatch | None) -> tuple[str, ...]:
@@ -1767,6 +1788,7 @@ def _retained_measurement_conflict_marks(
     *,
     present: Callable[[Sequence[DerivativesObservation]], tuple[DerivativesObservation, ...]],
     values_conflict: Callable[[Sequence[DerivativesObservation]], bool],
+    provenance_conflict: Callable[[Sequence[DerivativesObservation]], bool] = _observation_provenance_conflict,
 ) -> tuple[tuple[int, tuple[str, ...]], ...]:
     """Value and provenance conflicts for every retained identity and time.
 
@@ -1787,7 +1809,7 @@ def _retained_measurement_conflict_marks(
             continue
         if values_conflict(comparable):
             reason = ("duplicate_conflict",)
-        elif _observation_provenance_conflict(comparable):
+        elif provenance_conflict(comparable):
             reason = ("conflicting_provenance",)
         else:
             continue
@@ -1834,6 +1856,7 @@ def visible_selector_admission(
             tuple(item for rows in funding_rows for item in rows),
             present=_funding_values_present,
             values_conflict=_funding_conflict,
+            provenance_conflict=_funding_provenance_conflict,
         ),
         *_retained_measurement_conflict_marks(
             ratio_rows,

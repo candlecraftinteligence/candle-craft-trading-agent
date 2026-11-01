@@ -14,6 +14,7 @@ import httpx
 
 from app.context.models import ContextStatus
 from app.microstructure.reconnect import FeedRecovery, close_connection
+from app.microstructure.stream_evidence import StreamEvidence
 from app.microstructure.websocket_protocol import is_control_message as _is_control_message
 from app.microstructure.websocket_protocol import matches_usdt_perpetual, UnverifiedPayloadError
 from app.data.exceptions import (
@@ -214,6 +215,7 @@ class OrderBookLiquidityService:
         self.receive_timeout_seconds = float(receive_timeout_seconds)
         self.reconnect_reset_seconds = float(reconnect_reset_seconds)
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.evidence = StreamEvidence(self.clock)
         self.monotonic = monotonic or time.monotonic
         self.sleep = sleep or asyncio.sleep
         self.jitter = jitter or (lambda maximum: random.uniform(0.0, maximum))
@@ -290,6 +292,7 @@ class OrderBookLiquidityService:
                 self._recovery.stopped()
 
     def _invalidate_stream(self) -> None:
+        self.evidence.reset()
         self._connection = None
         self._active_symbols.clear()
         for book in self._books.values():
@@ -299,6 +302,7 @@ class OrderBookLiquidityService:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
         requested.add(BTC_ORDER_BOOK_SYMBOL)
         selected, overflow = _bounded_symbols(requested, maximum=self.max_symbols)
+        self.evidence.retain(selected)
         previous = set(self._desired_symbols)
         additions = selected - previous
         removals = previous - selected
@@ -338,6 +342,9 @@ class OrderBookLiquidityService:
 
     def snapshot(self, symbol: str) -> OrderBookLiquiditySnapshot:
         normalized = _normalize_symbol(symbol)
+        reason = self.evidence.identity_reason(normalized)
+        if reason:
+            return OrderBookLiquiditySnapshot.unavailable(symbol=normalized, reason=reason, status=ContextStatus.UNVERIFIED)
         overflow_reason = self._overflow_symbols.get(normalized)
         if overflow_reason is not None:
             return OrderBookLiquiditySnapshot.unavailable(
@@ -367,11 +374,14 @@ class OrderBookLiquidityService:
 
     def health(self) -> dict[str, Any]:
         return {
+            **self.evidence.health(self._desired_symbols),
             **self._recovery.health(),
             "running": self.running,
             "connected": self._connection is not None,
             "desired_symbol_count": len(self._desired_symbols),
-            "active_symbol_count": len(self._active_symbols),
+            "subscription_requested_symbol_count": len(self._active_symbols),
+            "active_symbol_count": len(self.evidence.acknowledged),
+            "subscription_confirmed": bool(self._desired_symbols and self._desired_symbols <= self.evidence.acknowledged),
             "overflow_symbol_count": len(self._overflow_symbols),
             "active_bootstrap_count": len(self._bootstrap_tasks),
             "connection_count": self._connection_count,
@@ -459,6 +469,7 @@ class OrderBookLiquidityService:
 
     def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
         if _is_control_message(payload):
+            self.evidence.control(payload)
             self._ignored_message_count += 1
             return False
         try:
@@ -470,9 +481,9 @@ class OrderBookLiquidityService:
             self._malformed_event_count += 1
             self._reject_unverified_payload()
             return False
-        if not matches_usdt_perpetual(event.symbol, event.pair_symbol):
+        if not self.evidence.matches(event.symbol, event.pair_symbol):
             self._wrong_contract_event_count += 1
-            if event.symbol in self._desired_symbols and matches_usdt_perpetual(event.symbol):
+            if event.symbol in self._desired_symbols and event.pair_symbol != event.symbol:
                 self._reject_unverified_payload()
             return False
         book = self._books.get(event.symbol)
@@ -480,6 +491,8 @@ class OrderBookLiquidityService:
             self._ignored_message_count += 1
             return False
         outcome = book.ingest(event, received_at=self.clock())
+        self.evidence.decoded(event.symbol, event.event_time, accepted=outcome in {
+            BookIngestOutcome.SYNCHRONIZED, BookIngestOutcome.APPLIED})
         if outcome in {
             BookIngestOutcome.NEEDS_RESYNC,
             BookIngestOutcome.BUFFER_OVERFLOW,
@@ -640,6 +653,7 @@ class OrderBookLiquidityService:
 
     def _subscription_message(self, method: str, symbols: set[str]) -> str:
         self._request_id += 1
+        self.evidence.requested(self._request_id, method, symbols)
         return json.dumps(
             {
                 "method": method,

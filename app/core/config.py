@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     runtime_generation_binding: str | None = None
     runtime_epoch_contract_version: str | None = None
 
-    cmc_collection_profile: Literal["FULL_RESEARCH", "DECISION_FOCUSED", "LOW_CREDIT", "CUSTOM"] = "FULL_RESEARCH"
+    cmc_collection_profile: Literal["FULL_RESEARCH", "DECISION_FOCUSED", "LOW_CREDIT", "RUNTIME_SHADOW", "CUSTOM"] = "FULL_RESEARCH"
     cmc_collection_profile_path: Path | None = None
 
     model_config = SettingsConfigDict(

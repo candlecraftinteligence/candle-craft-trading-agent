@@ -328,6 +328,10 @@ class ScannerRunConfig(BaseModel):
     order_book_liquidity_bootstrap_concurrency: int = 2
     order_book_liquidity_event_buffer_size: int = 256
     decision_timestamp: datetime | None = None
+    native_derivatives_snapshot: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
+    funding_schedule_snapshot: Any | None = Field(default=None, exclude=True, repr=False)
+    cmc_snapshot: Any | None = Field(default=None, exclude=True, repr=False)
+    structural_book_snapshots: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     # Run-local acquisition evidence; never accepted from CLI or serialized as config.
     price_precision_snapshot: dict[str, InstrumentPrecision | None] | None = Field(
         default=None, exclude=True, repr=False,
@@ -555,6 +559,7 @@ class ScannerRunConfig(BaseModel):
 
 class ScannerSymbolResult(BaseModel):
     cmc_evaluation: Any | None = Field(default=None, exclude=True, repr=False)
+    cmc_context: dict[str, Any] | None = None
     cmc_native_evidence: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     symbol: str
     status: ScannerPipelineStatus
@@ -773,6 +778,10 @@ class ScannerRuntimeStats(BaseModel):
     timed_out_symbols: int = 0
     not_run_symbols: int = 0
     outcome_counts: dict[str, int] = Field(default_factory=dict)
+    derivatives_prefetch: dict[str, Any] = Field(default_factory=dict)
+    stream_health: dict[str, Any] = Field(default_factory=dict)
+    analysis_worker: dict[str, Any] = Field(default_factory=dict)
+    cmc_acquisition: dict[str, Any] = Field(default_factory=dict)
     process_memory: ScannerProcessMemoryStats = Field(default_factory=ScannerProcessMemoryStats)
 
     model_config = ConfigDict(frozen=True)
@@ -833,6 +842,8 @@ class _CandidateBuildResult(BaseModel):
 
 
 class _OptionalMarketData(BaseModel):
+    cmc_context: dict[str, Any] | None = None
+    cmc_snapshot: Any | None = Field(default=None, exclude=True, repr=False)
     cmc_native_evidence: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     ticker: TickerDTO | Any | None = None
     funding: FundingDTO | Any | None = None
@@ -957,6 +968,8 @@ class ScannerRunner:
         resume_metadata: Mapping[str, Any] | None = None,
     ) -> ScannerRunResult:
         run_config = config if isinstance(config, ScannerRunConfig) else ScannerRunConfig.model_validate(config)
+        from app.core.cpu_analysis import analysis_worker
+        cpu_worker = analysis_worker()
         implicit_decision_clock = run_config.decision_timestamp is None
         if run_config.decision_timestamp is None:
             run_config = run_config.model_copy(
@@ -967,9 +980,10 @@ class ScannerRunner:
                     )
                 }
             )
+        cmc_service = None
         if run_config.cmc_mode != "off":
             from app.cmc.runtime import begin_collection
-            await begin_collection()
+            cmc_service = await begin_collection()
         process_memory_readings: list[ProcessMemoryReading] = [
             _safe_process_memory_reading(self.process_memory_sampler)
         ]
@@ -979,6 +993,7 @@ class ScannerRunner:
         results: list[ScannerSymbolResult] = []
         total_symbols = len(run_config.symbols)
         scan_started = time.monotonic()
+        prefetch_diagnostics = {}
         global_timeout_hit = False
         market_regime_context = {
             "btc_candles": (), "eth_candles": (), "missing_data": ("market_regime: N/A",)
@@ -990,6 +1005,7 @@ class ScannerRunner:
         )
 
         try:
+            await self._install_stream_metadata(client, run_config)
             if implicit_decision_clock and run_config.strategy_version == SELECTIVE_VERSION and run_config.enable_strategy_output:
                 underlying = client.client if isinstance(client, CachedMarketDataClient) else client
                 snapshot_method = getattr(underlying, "get_price_precision_snapshot", None)
@@ -1010,8 +1026,33 @@ class ScannerRunner:
                         await self._request_public_api(run_config, "shared instrument metadata", bulk_metadata)
                     except Exception as exc:
                         self.logger.debug("Instrument metadata unavailable: %s", type(exc).__name__)
-                # Precision acquisition predates the logical strategy cutoff.
+                # All optional native evidence is delivered before the immutable
+                # structural cutoff. A finite failure never stops core analysis.
+                from app.pipeline.causal_prefetch import bounded_prefetch
+                schedule_method = getattr(underlying, "get_funding_schedule_snapshot", None)
+                if callable(schedule_method):
+                    try:
+                        schedule = await self._request_public_api(run_config, "shared funding schedule",
+                            lambda: schedule_method(capture_clock=self.capture_clock), timeout_sec=3.0)
+                    except Exception:
+                        schedule = None
+                    run_config = run_config.model_copy(update={"funding_schedule_snapshot": schedule})
+                remaining = min(20.0, max(0.0, scan_deadline-time.monotonic())) if scan_deadline else 20.0
+                prefetched, prefetch_diagnostics = await bounded_prefetch(
+                    tuple(item.symbol for item in run_config.symbols),
+                    lambda symbol: self._fetch_optional_market_data(client, symbol, run_config),
+                    timeout=remaining,
+                )
+                run_config = run_config.model_copy(update={"native_derivatives_snapshot": prefetched})
+                if cmc_service is not None and callable(getattr(cmc_service, "wait_initial_snapshot", None)):
+                    await cmc_service.wait_initial_snapshot()
+                if run_config.order_book_liquidity_enabled:
+                    run_config = run_config.model_copy(update={"structural_book_snapshots": {
+                        item.symbol: self._order_book_snapshot(item.symbol, run_config) for item in run_config.symbols}})
+                # Metadata and derivative acquisition predate this logical cutoff.
                 run_config = run_config.model_copy(update={"decision_timestamp": normalize_utc_timestamp(self.clock())})
+            if cmc_service is not None:
+                run_config = run_config.model_copy(update={"cmc_snapshot": cmc_service.snapshot})
             if run_config.macro_event_context_enabled:
                 macro_event_snapshot = await self._build_macro_event_snapshot(
                     run_config,
@@ -1206,7 +1247,13 @@ class ScannerRunner:
                 total_runtime_seconds=total_runtime_seconds,
                 global_timeout_hit=global_timeout_hit,
                 process_memory=_process_memory_stats_for(process_memory_readings),
-            ),
+            ).model_copy(update={"derivatives_prefetch": prefetch_diagnostics,
+                "stream_health": self._stream_health(), "analysis_worker": cpu_worker.health(),
+                "cmc_acquisition": {"mode": run_config.cmc_mode,
+                    "collector_available": cmc_service is not None,
+                    "decision_snapshot_batch_id": getattr(run_config.cmc_snapshot, "batch_id", "N/A"),
+                    "collector_latest_batch_id": getattr(getattr(cmc_service, "snapshot", None), "batch_id", "N/A"),
+                    "last_acquisition": getattr(cmc_service, "last_acquisition", None)}}),
             market_regime=market_regime,
             regime_adjustments=market_regime.adjustment,
             regime_warnings=market_regime.warnings,
@@ -1558,20 +1605,26 @@ class ScannerRunner:
     ) -> ScannerSymbolResult:
         symbol = symbol_config.symbol
         microstructure_flow = self._microstructure_snapshot(symbol, config)
-        order_book_liquidity = self._order_book_snapshot(symbol, config)
+        order_book_liquidity = ((config.structural_book_snapshots or {}).get(symbol)
+            if config.structural_book_snapshots is not None else self._order_book_snapshot(symbol, config))
         candles_batch = await self._fetch_primary_candles(client, symbol, config, progress=progress)
         candles = candles_batch.candles
         liquidation_flow = self._liquidation_snapshot(symbol, config)
         technical_candles = _technical_candles(candles)
         current_price = _current_price_from_candles(candles)
         await _emit_progress(progress, "Fetching derivatives...")
-        optional_data = await self._fetch_optional_market_data(
-            client,
-            symbol,
-            config,
-            iteration_index=iteration_index,
-            symbol_deadline=symbol_deadline,
-        )
+        retained = (config.native_derivatives_snapshot or {}).get(symbol)
+        optional_data = (self._admit_native_data(retained, config) if retained is not None
+            else await self._fetch_optional_market_data(client, symbol, config,
+                iteration_index=iteration_index, symbol_deadline=symbol_deadline))
+        if config.cmc_mode == "shadow" and config.cmc_snapshot is not None:
+            optional_data = optional_data.model_copy(update={"cmc_snapshot": config.cmc_snapshot})
+        # Supporting context is refreshed after acquisition, without changing
+        # the structural decision clock or admitting future evidence to it.
+        microstructure_flow = self._microstructure_snapshot(symbol, config)
+        order_book_liquidity = ((config.structural_book_snapshots or {}).get(symbol)
+            if config.structural_book_snapshots is not None else self._order_book_snapshot(symbol, config))
+        liquidation_flow = self._liquidation_snapshot(symbol, config)
 
         optional_data = optional_data.model_copy(
             update={
@@ -2330,7 +2383,9 @@ class ScannerRunner:
             mode_name = mode.value
             strategy_input = LiquidityGrabInput.model_validate({**base_input, "mode": mode})
             try:
-                result = self.strategy_engine.analyze(strategy_input)
+                from app.core.cpu_analysis import analysis_worker
+                result = (await analysis_worker().run(self.strategy_engine.analyze, strategy_input)
+                    if config.strategy_version == SELECTIVE_VERSION else self.strategy_engine.analyze(strategy_input))
             except Exception as exc:
                 self.logger.warning("Strategy %s failed for symbol=%s mode=%s: %s", config.strategy_name, symbol, mode_name, exc)
                 code = str(exc).split(":", 1)[0]
@@ -2723,18 +2778,74 @@ class ScannerRunner:
                 evidence = {label: item for label, _v, _m, _w, item in optional_results if item is not None}
                 instrument = (await self._shadow_instrument(client, symbol, config)
                               if not withhold_shadow_instrument else None)
-            try:
-                observed_at = normalize_utc_timestamp(self.capture_clock(), field_name="supporting_context_cutoff")
-            except Exception:
-                observed_at = None
-            assessment, context = assess_native_context(evidence=evidence, instrument=instrument,
-                strategy_cutoff=config.decision_timestamp, observed_at=observed_at)
-            context["freshness_seconds"] = {"aggregate_flow": config.microstructure_flow_stale_sec,
-                "order_book": config.order_book_liquidity_stale_sec, "liquidations": config.liquidation_flow_stale_sec}
-            result = result.model_copy(update={**admitted_strategy_values(assessment),
-                "supporting_context": context, "derivatives_evidence": evidence,
+            result = result.model_copy(update={"derivatives_evidence": evidence,
                 "derivatives_instrument": instrument})
+            result = self._admit_native_data(result, config)
         return result
+
+    def _admit_native_data(self, result, config):
+        from app.data.funding_cadence import attach_funding_cadence
+        instrument = attach_funding_cadence(result.derivatives_instrument, result.derivatives_evidence,
+            config.funding_schedule_snapshot)
+        result = result.model_copy(update={"derivatives_instrument": instrument})
+        try:
+            observed_at = normalize_utc_timestamp(self.capture_clock(), field_name="supporting_context_cutoff")
+        except Exception:
+            observed_at = None
+        assessment, context = assess_native_context(evidence=result.derivatives_evidence,
+            instrument=result.derivatives_instrument,
+            strategy_cutoff=config.decision_timestamp, observed_at=observed_at)
+        context["freshness_seconds"] = {"aggregate_flow": config.microstructure_flow_stale_sec,
+            "order_book": config.order_book_liquidity_stale_sec, "liquidations": config.liquidation_flow_stale_sec}
+        frozen = result.derivatives_frozen_bundle
+        if frozen is not None:
+            frozen = freeze_derivatives_bundle(result.derivatives_evidence or {},
+                instrument=result.derivatives_instrument, strategy_cutoff=config.decision_timestamp,
+                observation=capture_observation_boundary(self.capture_clock), symbol=frozen.symbol,
+                requested_venue=config.exchange, scan_mode="fast" if config.fast_mode else "full")
+        return result.model_copy(update={**admitted_strategy_values(assessment),
+            "supporting_context": context, "derivatives_decision_cutoff": config.decision_timestamp,
+            "derivatives_frozen_bundle": frozen})
+
+    def _stream_health(self):
+        result = {}
+        for name, service in (("aggregate_flow", self.microstructure_flow_service),
+                              ("order_book", self.order_book_liquidity_service),
+                              ("liquidations", self.liquidation_flow_service)):
+            try:
+                if service is not None and callable(getattr(service, "health", None)):
+                    result[name] = service.health()
+            except Exception as exc:
+                result[name] = {"status": "Unverified", "reason": type(exc).__name__}
+        return result
+
+    def _supporting_snapshot(self, service, symbol, fallback):
+        if service is None:
+            return fallback
+        try:
+            snapshot = service.snapshot(symbol)
+            if hasattr(service, "evidence"):
+                service.evidence.assessed(symbol, snapshot)
+            return snapshot
+        except Exception:
+            return None
+
+    async def _install_stream_metadata(self, client, config):
+        services = [s for s in (self.microstructure_flow_service, self.order_book_liquidity_service,
+            self.liquidation_flow_service) if s is not None and hasattr(s, "evidence")]
+        if not services or config.exchange != "binance":
+            return
+        underlying = client.client if isinstance(client, CachedMarketDataClient) else client
+        method = getattr(underlying, "get_stream_contract_metadata", None)
+        payload, acquired_at = {}, None
+        if callable(method):
+            try:
+                payload, acquired_at = await self._request_public_api(config, "stream contract identity",
+                    lambda: method(capture_clock=self.capture_clock), timeout_sec=3.0)
+            except Exception:
+                pass
+        for service in services:
+            service.evidence.set_metadata(payload, acquired_at)
 
     async def _optional_call(
         self,
@@ -2971,7 +3082,15 @@ class ScannerRunner:
         )
         shadow, causal = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
         supporting_context = optional_data.supporting_context
+        cmc_context = optional_data.cmc_context
+        if optional_data.cmc_snapshot is not None:
+            from app.cmc.scanner_context import scanner_context
+            cmc_context = scanner_context(optional_data.cmc_snapshot, symbol=symbol,
+                cutoff=optional_data.derivatives_decision_cutoff, assessed_at=normalize_utc_timestamp(self.capture_clock()))
         if supporting_context is not None:
+            flow_snapshot = self._supporting_snapshot(self.microstructure_flow_service, symbol, strategy_execution.microstructure_flow)
+            book_snapshot = self._supporting_snapshot(self.order_book_liquidity_service, symbol, strategy_execution.order_book_liquidity)
+            liquidation_snapshot = self._supporting_snapshot(self.liquidation_flow_service, symbol, strategy_execution.liquidation_flow)
             try:
                 observed_at = normalize_utc_timestamp(self.capture_clock(), field_name="supporting_context_cutoff")
             except Exception:
@@ -2980,18 +3099,20 @@ class ScannerRunner:
             _, supporting_context = assess_native_context(evidence=optional_data.derivatives_evidence,
                 instrument=optional_data.derivatives_instrument,
                 strategy_cutoff=optional_data.derivatives_decision_cutoff, observed_at=observed_at)
+            supporting_context["freshness_seconds"] = limits
             supporting_context["streams"] = {
-                "aggregate_flow": observed_stream_context(strategy_execution.microstructure_flow,
+                "aggregate_flow": observed_stream_context(flow_snapshot,
                     as_of=observed_at, stale_seconds=limits["aggregate_flow"], expected_symbol=symbol,
                     limitation="Observed aggregate trades/CVD; never structural confirmation."),
-                "order_book": observed_stream_context(strategy_execution.order_book_liquidity,
+                "order_book": observed_stream_context(book_snapshot,
                     as_of=observed_at, stale_seconds=limits["order_book"], expected_symbol=symbol,
                     limitation="Visible liquidity may be cancelled; no guarantee of resting orders."),
-                "liquidations": observed_stream_context(strategy_execution.liquidation_flow,
+                "liquidations": observed_stream_context(liquidation_snapshot,
                     as_of=observed_at, stale_seconds=limits["liquidations"], expected_symbol=symbol,
                     limitation="Incomplete observed liquidations, not a complete heatmap."),
             }
         return ScannerSymbolResult(
+            cmc_context=cmc_context,
             cmc_native_evidence=optional_data.cmc_native_evidence,
             derivatives_supporting_context=supporting_context,
             rejection_category=(NA if trade_idea is not None else _first_non_na(

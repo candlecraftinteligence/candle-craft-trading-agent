@@ -59,6 +59,9 @@ class InstrumentMetadata:
     reason_codes: tuple[str, ...]
     source_endpoint: str
     acquisition: AcquisitionFact
+    funding_cadence_source: str | None = None
+    funding_cadence_acquired_at: datetime | None = None
+    funding_cadence_source_at: datetime | None = None
 
 
 def unverified_instrument(

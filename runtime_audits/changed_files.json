@@ -1,0 +1,191 @@
+{
+  "baseline": "0decc2158df59969b38a2d7441bec2441a3adc5b",
+  "implementation_commit": "677181fab8a6bbff316b0d0a0c551cc82d1faab1",
+  "files": [
+    {
+      "path": "app/analytics/derivatives_context.py",
+      "git_blob": "d200bf6ec50d06baa28266b80e15b8832a7baf23",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/analytics/derivatives_source_truth.py",
+      "git_blob": "7d264f87a8a476761804cdf59fb5650ee807c606",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/cmc/client.py",
+      "git_blob": "7047de9fd616d53b80179210791db8873baf3eb0",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/cmc/collection.py",
+      "git_blob": "4775c2bfc8fef0d6abc98ab1f2cab6a07b5bf23a",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/cmc/integration.py",
+      "git_blob": "4114eec76031e69c181d6139ab3f0775f21b1398",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/cmc/profiles.py",
+      "git_blob": "62d0db4bc63846712bd8f3c7c831c1a128064a8b",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/cmc/runtime.py",
+      "git_blob": "dca9ed602e3444c70c61cc106eb39e550490d213",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/cmc/scanner_context.py",
+      "git_blob": "d5569ff5a9a45bae7a309c204fe2dd81ed54071e",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/context/models.py",
+      "git_blob": "1718511be620a190ae82d47398616b4fe6c8bdf9",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/core/config.py",
+      "git_blob": "f03fc01f53ed9bb78ba6fa3495d4f48f523e8d81",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/core/cpu_analysis.py",
+      "git_blob": "68b93288e3843788e8b7265c453bd9f98d8de57a",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/data/derivatives_instrument.py",
+      "git_blob": "62846f4fa5ff74402c24068b5127b25e9fed0767",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/data/exchange_clients/binance_futures.py",
+      "git_blob": "2ceaa116861e55ea48b16059ac676cf40487dbd3",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/data/funding_cadence.py",
+      "git_blob": "b005105074c0971b23c5d37b35984b28cc6ec756",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/microstructure/agg_trade.py",
+      "git_blob": "5e7848be20752bd04c2cf8d05dcb44c483009b27",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/microstructure/liquidation.py",
+      "git_blob": "aecc1d9cd5fa3a363898088db101706f84debb4e",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/microstructure/liquidation_service.py",
+      "git_blob": "5aafc948e5ecb23944421a091766329b2b6eeeb1",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/microstructure/order_book.py",
+      "git_blob": "2d7dac3e582b689b217449ac3259f38e893b80b9",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/microstructure/order_book_service.py",
+      "git_blob": "44df077ddc51b72557a8946f45583c27808a3974",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/microstructure/service.py",
+      "git_blob": "86f8d32deedc437c681472e8507e75d11a5217c4",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/microstructure/stream_evidence.py",
+      "git_blob": "c744b87fe426aaac98223002d2034ef030c08898",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/microstructure/websocket_protocol.py",
+      "git_blob": "a439abad0fba6f45c827311afdd3a056d7530931",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/pipeline/causal_prefetch.py",
+      "git_blob": "089e2037991665bd3896971c27e3558a37fbc6cd",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/pipeline/scanner_runner.py",
+      "git_blob": "3f33654fe7f69b6d91b8519e7bf75200eeba977f",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "app/universe/canonical_qualification.py",
+      "git_blob": "4f0e93be6654913318c8a3cef221b455f4f6b5cd",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "config/cmc/identity.runtime-repair.proposed.json",
+      "git_blob": "c50341f65570a384f681c1c341e27830152d25ee",
+      "scope": "CMC identity proposal"
+    },
+    {
+      "path": "docs/research/market_data_foundation/A_inventory.md",
+      "git_blob": "6d8463747c45b3fcbd9d81b060ebba57f5995317",
+      "scope": "source inventory and generated anchors"
+    },
+    {
+      "path": "docs/research/market_data_foundation/inventory.json",
+      "git_blob": "16036338b71c32e85014231db51ad15591dc73ab",
+      "scope": "source inventory and generated anchors"
+    },
+    {
+      "path": "research/market_data_foundation/catalog.py",
+      "git_blob": "3662d1c2a83189a1fe7461dae29becf280c0c17c",
+      "scope": "source inventory and generated anchors"
+    },
+    {
+      "path": "scripts/cci_v2_repair_preflight.py",
+      "git_blob": "cc12dec0a87df926efd31685d1083cfd89a0acf7",
+      "scope": "scoped implementation"
+    },
+    {
+      "path": "tests/test_derivatives_causal_observation_corrections.py",
+      "git_blob": "3a66a46bdb99cc6935e8702b55323ae48af1db6d",
+      "scope": "regression tests"
+    },
+    {
+      "path": "tests/test_production_repair_cmc.py",
+      "git_blob": "fb1b84da4afca49a2b4c9fbabbd7f9e74f6a8996",
+      "scope": "regression tests"
+    },
+    {
+      "path": "tests/test_production_repair_cpu.py",
+      "git_blob": "9459dca95c66f3bbd6980a4095d500b90a0c53a6",
+      "scope": "regression tests"
+    },
+    {
+      "path": "tests/test_production_repair_derivatives.py",
+      "git_blob": "8132ae23f0be695d005ddffebb9f3da3d79fdd48",
+      "scope": "regression tests"
+    },
+    {
+      "path": "tests/test_production_repair_preflight.py",
+      "git_blob": "bc45b93c405755cad8b871c19de4c11a4c0dab53",
+      "scope": "regression tests"
+    },
+    {
+      "path": "tests/test_production_repair_streams.py",
+      "git_blob": "24dc4315e432e0f0f83919aa4b2a35352619870b",
+      "scope": "regression tests"
+    },
+    {
+      "path": "tests/test_scan_precision_snapshot.py",
+      "git_blob": "ba55a96d19c222e52abc163d300fb80f7a481631",
+      "scope": "regression tests"
+    }
+  ]
+}

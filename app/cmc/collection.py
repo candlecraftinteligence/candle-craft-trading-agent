@@ -109,6 +109,8 @@ class Collector:
         # Sequential endpoint families, with only client-bounded concurrent callers. This
         # avoids a burst of requests on the resource-constrained scanner host.
         fetched, errors = [], []
+        if not self.manifest.bindings:
+            errors.append("identity_manifest_empty:asset_enrichment_unavailable")
         if self.profile and not self._restored:
             saved = await asyncio.to_thread(self.store.causal, "collection_family", self.client.clock(), limit=64)
             for row in saved:

@@ -1,0 +1,20 @@
+{
+  "started_at": "2026-11-01T14:07:49.154873+00:00",
+  "finished_at": "2026-11-01T14:18:11.376674+00:00",
+  "totals": {
+    "tests": 4533,
+    "failure": 1,
+    "error": 0,
+    "skipped": 0
+  },
+  "exit_codes": [
+    0,
+    0,
+    1,
+    0
+  ],
+  "missing": [],
+  "unexpected": [],
+  "source_changed": [],
+  "all_collected_tests_executed_once": true
+}

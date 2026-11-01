@@ -1,0 +1,29 @@
+{
+  "required_collected_tests": 4533,
+  "complete_suite_initial": {
+    "passed": 4532,
+    "failed": 1,
+    "errors": 0,
+    "skipped": 0,
+    "receipt": "full_pytest.xml"
+  },
+  "initial_failures": [
+    {
+      "classname": "tests.test_market_data_foundation",
+      "name": "test_reports_name_every_required_section"
+    }
+  ],
+  "repair": "Regenerated deterministic inventory documents after source anchors moved; no application or test source changes during the frozen suite run",
+  "targeted_rerun": {
+    "module": "tests/test_market_data_foundation.py",
+    "passed": 34,
+    "failed": 0,
+    "receipt": "final_docs_regression.xml"
+  },
+  "final_unique_tests_with_passing_results": 4533,
+  "unverified_or_skipped_tests": 0,
+  "application_test_and_configuration_sources_changed_during_full_run": [],
+  "coverage_manifest": "pytest_partitions.json",
+  "original_failure_receipts_preserved": true,
+  "combined_passing_receipt": "final_verified_coverage.xml"
+}

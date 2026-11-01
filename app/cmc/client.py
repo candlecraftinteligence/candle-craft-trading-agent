@@ -68,6 +68,8 @@ class CmcClient:
         self._inflight = {}
         self._failures, self._open_until = 0, 0.0
         self.capabilities: dict[str, str] = {}
+        self._denied = {}
+        self._credential_ref = hashlib.sha256(api_key.get_secret_value().encode()).hexdigest() if api_key else "keyless"
 
     async def aclose(self):
         tasks = tuple(self._inflight.values())
@@ -154,6 +156,15 @@ class CmcClient:
         return Fetch(endpoint=endpoint, acquired_at=self.clock(), state=state, error=reason)
 
     async def _fetch(self, endpoint, params):
+        entitlement_kind = "entitlement:" + stable_id((endpoint.value, self._credential_ref))
+        if endpoint not in self._denied:
+            saved = await asyncio.to_thread(self.store.causal, entitlement_kind, self.clock(), limit=1)
+            if saved:
+                self._denied[endpoint] = saved[0]["reason"]
+        if endpoint in self._denied:
+            reason = self._denied[endpoint]
+            self.capabilities[endpoint.value] = "UNAVAILABLE:" + reason
+            return self._error(endpoint, reason, EvidenceState.UNAVAILABLE)
         if not self._key and not (self.keyless and CONTRACTS[endpoint].keyless):
             self.capabilities[endpoint.value] = "UNAVAILABLE:credential_or_keyless_route"
             return self._error(endpoint, "credential_or_keyless_route", EvidenceState.UNAVAILABLE)
@@ -181,6 +192,12 @@ class CmcClient:
                         self._request(url, headers, params), timeout=self.timeout)
                     if response_code in (401, 403):
                         result = self._error(endpoint, f"http_{response_code}_entitlement", EvidenceState.UNAVAILABLE)
+                        if response_code == 403:
+                            self._denied[endpoint] = result.error
+                            await asyncio.to_thread(self.store.put, entitlement_kind,
+                                {"endpoint": endpoint.value, "reason": result.error,
+                                 "revalidation": "explicit_account_or_configuration_review_required"},
+                                acquired_at=self.clock())
                         break
                     if response_code == 429 or response_code >= 500:
                         result = self._error(endpoint, f"http_{response_code}")

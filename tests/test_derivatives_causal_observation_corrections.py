@@ -525,7 +525,8 @@ def test_identical_older_duplicate_stays_admissible(reverse: bool) -> None:
     assert _overlap(payload, "duplicate_conflict") == 0
 
 
-def test_older_provenance_conflict_is_excluded_and_order_independent() -> None:
+@pytest.mark.parametrize("conflicting_route", [False, True])
+def test_older_settled_receipts_and_provenance_conflicts_are_order_independent(conflicting_route: bool) -> None:
     bundle = build_verified_coverage_fixture().attempts[0].record.bundle
     oldest = bundle.evidence_map()["funding_history"].observations[0]
     old_at = oldest.metric_time.at - timedelta(minutes=5)
@@ -533,16 +534,21 @@ def test_older_provenance_conflict_is_excluded_and_order_independent() -> None:
     row = replace(oldest, metric_time=stamp)
     shifted = replace(
         row,
+        endpoint=row.endpoint + "/incompatible" if conflicting_route else row.endpoint,
         acquisition=replace(row.acquisition, acquired_at=row.acquisition.acquired_at + timedelta(seconds=1)),
     )
     forward, forward_payload = _report(_older_rows(bundle, "funding_history", (row, shifted), reverse=False))
     reverse, reverse_payload = _report(_older_rows(bundle, "funding_history", (row, shifted), reverse=True))
     for record, payload in ((forward, forward_payload), (reverse, reverse_payload)):
         admission = _rate(payload, "causally_admissible_observations")
-        assert payload["complete_verified_coverage"] is False
-        assert admission["numerator"] < admission["denominator"]
+        assert payload["complete_verified_coverage"] is (not conflicting_route)
+        if conflicting_route:
+            assert admission["numerator"] < admission["denominator"]
+            assert _overlap(payload, "conflicting_provenance") >= 2
+        else:
+            assert admission["numerator"] == admission["denominator"]
+            assert _overlap(payload, "conflicting_provenance") == 0
         assert admission["numerator"] > 0
-        assert _overlap(payload, "conflicting_provenance") >= 2
         assert record.research_assessment.evaluation.oi_change_pct == "10.00000000"
         assert _rate(payload, "verified_oi_quantity_changes")["numerator"] == 1
     assert _rate(forward_payload, "causally_admissible_observations")["numerator"] == _rate(
