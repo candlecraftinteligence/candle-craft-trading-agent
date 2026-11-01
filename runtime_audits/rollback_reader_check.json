@@ -1,0 +1,17 @@
+{
+  "purpose": "SYNTHETIC offline rollback typed-reader compatibility; not Runtime acceptance",
+  "checked_at": "2026-11-01T14:42:41.626269+00:00",
+  "audited_reader": "0decc2158df59969b38a2d7441bec2441a3adc5b",
+  "new_status_accepted": false,
+  "validation_errors": [
+    {
+      "type": "enum",
+      "loc": [
+        "status"
+      ]
+    }
+  ],
+  "baseline_status_control_accepted": true,
+  "conclusion": "Do not perform unmodified code rollback after new UNVERIFIED payloads; require a compatible reader release or keep the repaired reader with CMC OFF",
+  "production_state_accessed": false
+}

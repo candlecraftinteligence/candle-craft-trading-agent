@@ -1,0 +1,205 @@
+{
+  "label": "SYNTHETIC DEV CPU profile; not runtime latency proof",
+  "rows": [
+    {
+      "file": "\\app\\pipeline\\scanner_runner.py",
+      "line": 1579,
+      "name": "_scan_symbol",
+      "calls": 8,
+      "self_seconds": 0.000434,
+      "cumulative_seconds": 2.517944
+    },
+    {
+      "file": "\\app\\pipeline\\scanner_runner.py",
+      "line": 2189,
+      "name": "_run_strategy",
+      "calls": 5,
+      "self_seconds": 0.001515,
+      "cumulative_seconds": 2.437581
+    },
+    {
+      "file": "\\app\\strategies\\liquidity_grab_pullback.py",
+      "line": 487,
+      "name": "analyze",
+      "calls": 3,
+      "self_seconds": 0.000261,
+      "cumulative_seconds": 2.215208
+    },
+    {
+      "file": "\\app\\strategies\\liquidity_grab_pullback.py",
+      "line": 570,
+      "name": "_analyze_mode",
+      "calls": 9,
+      "self_seconds": 0.001843,
+      "cumulative_seconds": 1.261839
+    },
+    {
+      "file": "\\app\\strategies\\liquidity_grab_pullback.py",
+      "line": 908,
+      "name": "detect_liquidity_sweep",
+      "calls": 12,
+      "self_seconds": 0.011119,
+      "cumulative_seconds": 0.820447
+    },
+    {
+      "file": "\\app\\strategies\\liquidity_grab_pullback.py",
+      "line": 1214,
+      "name": "_normalize_candles",
+      "calls": 45,
+      "self_seconds": 0.151327,
+      "cumulative_seconds": 0.680018
+    },
+    {
+      "file": "\\app\\strategies\\liquidity_grab_pullback.py",
+      "line": 1182,
+      "name": "_normalize_all_timeframes",
+      "calls": 3,
+      "self_seconds": 0.000107,
+      "cumulative_seconds": 0.651575
+    },
+    {
+      "file": "\\app\\strategies\\liquidity_grab_pullback.py",
+      "line": 1286,
+      "name": "_calculate_atr_from_normalized",
+      "calls": 2457,
+      "self_seconds": 0.416583,
+      "cumulative_seconds": 0.622162
+    },
+    {
+      "file": "\\app\\data\\candle_integrity.py",
+      "line": 469,
+      "name": "closed_candles_as_of",
+      "calls": 33,
+      "self_seconds": 0.007722,
+      "cumulative_seconds": 0.528911
+    },
+    {
+      "file": "\\app\\data\\candle_integrity.py",
+      "line": 180,
+      "name": "validate_candle_values",
+      "calls": 7260,
+      "self_seconds": 0.123832,
+      "cumulative_seconds": 0.450743
+    },
+    {
+      "file": "\\app\\strategies\\selective_timeframes.py",
+      "line": 14,
+      "name": "closed_selective_timeframes",
+      "calls": 3,
+      "self_seconds": 0.010656,
+      "cumulative_seconds": 0.449464
+    },
+    {
+      "file": "\\app\\analytics\\pullback_zones.py",
+      "line": 220,
+      "name": "analyze_pullback_zone",
+      "calls": 9,
+      "self_seconds": 0.001466,
+      "cumulative_seconds": 0.36452
+    },
+    {
+      "file": "\\app\\data\\candle_freshness.py",
+      "line": 215,
+      "name": "assess_essential_discovery",
+      "calls": 4,
+      "self_seconds": 0.000364,
+      "cumulative_seconds": 0.286176
+    },
+    {
+      "file": "\\app\\data\\candle_freshness.py",
+      "line": 285,
+      "name": "assess_candle_freshness",
+      "calls": 16,
+      "self_seconds": 0.000349,
+      "cumulative_seconds": 0.285747
+    },
+    {
+      "file": "\\app\\strategies\\liquidity_grab_pullback.py",
+      "line": 2429,
+      "name": "_analyze_structure_layer",
+      "calls": 3,
+      "self_seconds": 0.000156,
+      "cumulative_seconds": 0.25046
+    },
+    {
+      "file": "\\app\\analytics\\structural_liquidity.py",
+      "line": 20,
+      "name": "confirmed_levels",
+      "calls": 36,
+      "self_seconds": 0.035686,
+      "cumulative_seconds": 0.221089
+    },
+    {
+      "file": "\\app\\data\\candle_integrity.py",
+      "line": 685,
+      "name": "_has_field",
+      "calls": 120825,
+      "self_seconds": 0.06077,
+      "cumulative_seconds": 0.20136
+    },
+    {
+      "file": "\\app\\strategies\\liquidity_grab_pullback.py",
+      "line": 972,
+      "name": "detect_structure_shift",
+      "calls": 12,
+      "self_seconds": 0.000288,
+      "cumulative_seconds": 0.184193
+    },
+    {
+      "file": "\\app\\data\\candle_integrity.py",
+      "line": 650,
+      "name": "validate_optional_candle_metadata",
+      "calls": 12549,
+      "self_seconds": 0.0362,
+      "cumulative_seconds": 0.167832
+    },
+    {
+      "file": "\\app\\cache\\market_data_cache.py",
+      "line": 189,
+      "name": "_fetch_with_local_delivery",
+      "calls": 11,
+      "self_seconds": 0.000182,
+      "cumulative_seconds": 0.1677
+    },
+    {
+      "file": "\\app\\pipeline\\scanner_runner.py",
+      "line": 2460,
+      "name": "_fetch_strategy_timeframe_candles",
+      "calls": 4,
+      "self_seconds": 8.6e-05,
+      "cumulative_seconds": 0.165682
+    },
+    {
+      "file": "\\app\\analytics\\pullback_zones.py",
+      "line": 449,
+      "name": "<genexpr>",
+      "calls": 117,
+      "self_seconds": 0.00012,
+      "cumulative_seconds": 0.164085
+    },
+    {
+      "file": "\\app\\data\\candle_batch_evidence.py",
+      "line": 785,
+      "name": "fetch_klines_with_delivery",
+      "calls": 12,
+      "self_seconds": 5e-05,
+      "cumulative_seconds": 0.14824
+    },
+    {
+      "file": "\\app\\cache\\market_data_cache.py",
+      "line": 390,
+      "name": "fetch",
+      "calls": 4,
+      "self_seconds": 2.2e-05,
+      "cumulative_seconds": 0.146711
+    },
+    {
+      "file": "\\app\\data\\exchange_clients\\binance_futures.py",
+      "line": 83,
+      "name": "get_klines_with_delivery",
+      "calls": 4,
+      "self_seconds": 2.5e-05,
+      "cumulative_seconds": 0.146599
+    }
+  ]
+}
