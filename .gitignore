@@ -63,3 +63,7 @@ replay_validation/*.jsonl
 # DEV-only market-data foundation runs. Raw provider payloads stay local.
 research_runs/
 /pytest_tmp/cmc-*
+
+# Isolated release verification environments; never source or deliver them.
+/.ci-venv/
+/.venv31210/

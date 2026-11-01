@@ -89,6 +89,10 @@ round-trip attempts corrected fixture current-row uniqueness, async worker clean
 and exact protocol status/continuation expectations. Three wrapper tests initially
 hit Windows PowerShell 5.1's Restricted policy. They were rerun with installed
 PowerShell 7 under its existing RemoteSigned policy; no policy was changed or bypassed.
+The first exact-head Windows CI job stopped at pip check because the hosted global
+Python included pipx with an incompatible packaging requirement. CI now uses a
+fresh project venv on both platforms, matching DEV isolation; pip check is retained.
+The failed job log and subsequent exact-head results are included in the packet.
 
 ## Runtime profile compatibility
 
