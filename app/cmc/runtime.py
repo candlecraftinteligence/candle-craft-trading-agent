@@ -30,6 +30,7 @@ class Service:
         self.next_refresh = 0
         self.closed = False
         self.last_acquisition = None
+        self.first_refresh = asyncio.Event()
         self.universe_fetch = None  # one bounded bulk discovery response; never a new ranking authority
 
     def schedule(self):
@@ -62,6 +63,7 @@ class Service:
             outcome = type(exc).__name__
             logger.warning("CMC collection unavailable: %s", outcome)
         finally:
+            self.first_refresh.set()
             self.last_acquisition = {
                 "started_at": started_at,
                 "duration_seconds": round(max(0.0, time.monotonic() - started), 3),
@@ -76,6 +78,13 @@ class Service:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
         await self.collector.client.aclose()
+
+    async def wait_initial_snapshot(self, timeout=3.0):
+        if self.snapshot.batch_id == "N/A":
+            try:
+                await asyncio.wait_for(self.first_refresh.wait(), timeout=timeout)
+            except TimeoutError:
+                pass
 
 
 def _construct(settings):

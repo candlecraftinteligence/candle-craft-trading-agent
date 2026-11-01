@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any
 
 from app.context.models import ContextStatus
+from app.microstructure.websocket_protocol import exact_stream_symbol
 from app.data.candle_integrity import normalize_utc_timestamp
 from app.microstructure.order_book_models import (
     LiquidityBandSnapshot,
@@ -90,8 +91,11 @@ def parse_binance_depth_event(payload: str | bytes | Mapping[str, Any]) -> Binan
             raise WrongOrderBookContractTypeError("COIN-M depth event rejected")
         raise OrderBookPayloadError("depth event st must be 1 for USD-M")
 
-    symbol = _required_text(decoded, "s").upper()
-    pair_symbol = _required_text(decoded, "ps").upper()
+    try:
+        symbol = exact_stream_symbol(decoded.get("s"))
+        pair_symbol = exact_stream_symbol(decoded.get("ps"))
+    except ValueError as exc:
+        raise OrderBookPayloadError("depth literal contract identity invalid") from exc
     first_update_id = _required_non_negative_int(decoded, "U")
     final_update_id = _required_non_negative_int(decoded, "u")
     previous_final_update_id = _required_non_negative_int(decoded, "pu")

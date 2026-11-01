@@ -24,7 +24,7 @@ class Family(Frozen):
 
 
 class CollectionProfile(Frozen):
-    name: Literal["FULL_RESEARCH", "DECISION_FOCUSED", "LOW_CREDIT", "CUSTOM"]
+    name: Literal["FULL_RESEARCH", "DECISION_FOCUSED", "LOW_CREDIT", "RUNTIME_SHADOW", "CUSTOM"]
     families: tuple[Family, ...]
     concurrency: int = Field(default=2, ge=1, le=4)
     requests_per_minute: int = Field(default=45, ge=1, le=50)
@@ -48,6 +48,14 @@ class CollectionProfile(Frozen):
 
 
 def profile_for(name="FULL_RESEARCH", *, legacy_seconds=300, custom_path: Path | None = None):
+    if name == "RUNTIME_SHADOW":
+        # 433 reserved credits/day before retries; no ranking-provider switch.
+        return CollectionProfile(name=name, families=(
+            Family(endpoint=Endpoint.GLOBAL, seconds=300),
+            Family(endpoint=Endpoint.LIQUIDATIONS, seconds=900),
+            Family(endpoint=Endpoint.EXCHANGE_PAIRS, seconds=1800, limit=250),
+            Family(endpoint=Endpoint.MAP, seconds=86400, limit=1000),
+            Family(endpoint=Endpoint.EXCHANGES, seconds=86400, limit=100)))
     if name == "CUSTOM":
         if custom_path is None or custom_path.stat().st_size > 32768:
             raise ValueError("bounded custom profile file required")

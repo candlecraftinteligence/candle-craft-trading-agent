@@ -217,6 +217,9 @@ def _verified_mapping(
 # Ticker collisions mapped here are the higher-ranked provider id whose name
 # matches the established asset. CC, FLR, RAIN, and TON stay unmapped.
 _VERIFIED_CONTRACT_MAPPINGS = (
+    # 2026-11-01 exact CoinPaprika xrp-xrp, CMC ID 52 / market 47207 and
+    # Binance XRPUSDT metadata; source hashes in the production repair packet.
+    _verified_mapping("xrp-xrp", "XRP", "XRP", 1),
     _verified_mapping("hype-hyperliquid", "HYPE", "HYPE", 1),
     _verified_mapping("arb-arbitrum", "ARB", "ARB", 1),
     _verified_mapping("grt-the-graph", "GRT", "GRT", 1),

@@ -24,8 +24,15 @@ class UnverifiedPayloadError(ValueError):
 
 def matches_usdt_perpetual(symbol: str, pair_symbol: str | None = None) -> bool:
     """Check the literal stream identity; the requested universe proves listing metadata."""
-    return (symbol.isascii() and symbol.isalnum() and symbol.endswith("USDT")
+    return (isinstance(symbol, str) and symbol.isalnum() and len(symbol) > 4
+            and symbol == symbol.upper() and symbol.endswith("USDT")
             and (pair_symbol is None or pair_symbol == symbol))
+
+
+def exact_stream_symbol(value: Any) -> str:
+    if not isinstance(value, str) or not value.replace("_", "").isalnum() or value != value.upper():
+        raise ValueError("invalid_literal_contract_identity")
+    return value
 
 
 def is_subscription_ack(payload: str | bytes | Mapping[str, Any], request_id: int) -> bool:

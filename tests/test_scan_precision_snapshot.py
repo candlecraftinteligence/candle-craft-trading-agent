@@ -47,6 +47,14 @@ def _scan(monkeypatch, direction, ratio, *, next_bar=False, invalid=None, warm_c
             self.precision_lookups += 1
             return await super().get_price_precision(symbol)
 
+        async def _get_klines_delivery(self, *args, **kwargs):
+            delivery = await super()._get_klines_delivery(*args, **kwargs)
+            # Derivatives metadata is now prefetched before the decision. Model
+            # an independent later consumer refreshing the same expired cache.
+            if self.expired and self.exchange_info_requests == 1:
+                await self.get_instrument_metadata("BTCUSDT", capture_clock=lambda: now[0])
+            return delivery
+
         async def get_price_precision_snapshot(self, symbols):
             if invalid == "fetch_failure":
                 raise TimeoutError("synthetic snapshot timeout")
@@ -102,7 +110,7 @@ def test_refresh_during_real_scan_preserves_plan_risk_lifecycle_and_fake_deliver
         assert symbol.risk_decision.approved
         assert producer_acquisition_from_symbol_result(symbol) is not None
         assert client.precision_lookups == 0  # no post-cutoff precision request
-        assert client.exchange_info_requests == 2  # preload plus optional metadata refresh
+        assert client.exchange_info_requests == 2  # preload plus independent post-cutoff refresh
         assert "price_precision_snapshot" not in result.config.model_dump()
         for mode in symbol.valid_strategy_modes:
             diagnostic = symbol.strategy_diagnostics[mode]

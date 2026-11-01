@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+from app.microstructure.websocket_protocol import exact_stream_symbol
 
 
 UM_STREAM_TYPE = 1
@@ -83,9 +84,10 @@ def parse_binance_agg_trade(
     elif stream_type != UM_STREAM_TYPE:
         raise WrongContractTypeError(f"unsupported aggTrade stream type st={stream_type}")
 
-    symbol = str(payload.get("s") or "").strip().upper()
-    if not symbol:
-        raise AggTradePayloadError("aggTrade symbol is missing")
+    try:
+        symbol = exact_stream_symbol(payload.get("s"))
+    except ValueError as exc:
+        raise AggTradePayloadError("aggTrade literal contract identity invalid") from exc
     price = _decimal(payload, "p", positive=True)
     quantity = _decimal(payload, "q", positive=True)
     normal_quantity = _optional_decimal(payload, "nq")

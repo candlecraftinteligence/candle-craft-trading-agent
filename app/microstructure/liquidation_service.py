@@ -10,6 +10,7 @@ from typing import Any
 
 from app.context.models import ContextStatus
 from app.microstructure.reconnect import FeedRecovery, close_connection
+from app.microstructure.stream_evidence import StreamEvidence
 from app.microstructure.websocket_protocol import is_control_message as _is_control_message
 from app.microstructure.websocket_protocol import matches_usdt_perpetual, UnverifiedPayloadError
 from app.microstructure.websocket_protocol import is_subscription_ack
@@ -75,6 +76,7 @@ class LiquidationFlowService:
         self.reconnect_max_seconds = float(reconnect_max_seconds)
         self.subscription_timeout_seconds = float(subscription_timeout_seconds)
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.evidence = StreamEvidence(self.clock)
         self.sleep = sleep or asyncio.sleep
         self.logger = log or logger
         self._lifecycle_lock = asyncio.Lock()
@@ -136,6 +138,7 @@ class LiquidationFlowService:
                 self._recovery.stopped()
 
     def _invalidate_stream(self) -> None:
+        self.evidence.reset()
         self._connection = None
         self._subscription_confirmed = False
         for aggregator in self._aggregators.values():
@@ -145,6 +148,7 @@ class LiquidationFlowService:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
         requested.add(BTC_LIQUIDATION_SYMBOL)
         selected, overflow = _bounded_symbols(requested, maximum=self.max_symbols)
+        self.evidence.retain(selected)
         overflow_reason = f"retention_limit_exceeded:max_symbols={self.max_symbols}"
         async with self._state_lock:
             previous = set(self._desired_symbols)
@@ -152,6 +156,8 @@ class LiquidationFlowService:
             removals = previous - selected
             self._desired_symbols = set(selected)
             self._overflow_symbols = {symbol: overflow_reason for symbol in overflow}
+            if self._subscription_confirmed:
+                self.evidence.acknowledged.update(selected)
             for symbol in additions:
                 aggregator = SymbolLiquidationAggregator(
                     symbol,
@@ -174,6 +180,9 @@ class LiquidationFlowService:
 
     def snapshot(self, symbol: str) -> LiquidationFlowSnapshot:
         normalized = _normalize_symbol(symbol)
+        reason = self.evidence.identity_reason(normalized)
+        if reason:
+            return LiquidationFlowSnapshot.unavailable(symbol=normalized, reason=reason, status=ContextStatus.UNVERIFIED)
         overflow_reason = self._overflow_symbols.get(normalized)
         if overflow_reason is not None:
             return LiquidationFlowSnapshot.unavailable(
@@ -215,10 +224,12 @@ class LiquidationFlowService:
 
     def health(self) -> dict[str, Any]:
         return {
+            **self.evidence.health(self._desired_symbols),
             **self._recovery.health(),
             "running": self.running,
             "connected": self._connection is not None,
             "subscription_confirmed": self._subscription_confirmed,
+            "subscription_scope": "all_markets",
             "tracked_symbol_count": len(self._desired_symbols),
             "overflow_symbol_count": len(self._overflow_symbols),
             "connection_count": self._connection_count,
@@ -245,6 +256,7 @@ class LiquidationFlowService:
                 self._connection_count += 1
                 self._connection = connection
                 self._pending_reconnect = reconnect
+                self.evidence.requested(self._connection_count, "SUBSCRIBE", self._desired_symbols)
                 await connection.send(json.dumps({
                     "method": "SUBSCRIBE", "params": [BINANCE_ALL_MARKET_LIQUIDATION_STREAM],
                     "id": self._connection_count,
@@ -291,6 +303,7 @@ class LiquidationFlowService:
 
     def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
         if _is_control_message(payload):
+            self.evidence.control(payload)
             self._ignored_message_count += 1
             if (self._connection is not None and not self._subscription_confirmed
                     and is_subscription_ack(payload, self._connection_count)):
@@ -307,9 +320,9 @@ class LiquidationFlowService:
             self._malformed_event_count += 1
             self._reject_unverified_payload()
             return False
-        if not matches_usdt_perpetual(event.symbol, event.pair_symbol):
+        if not self.evidence.matches(event.symbol, event.pair_symbol):
             self._wrong_contract_event_count += 1
-            if event.symbol in self._desired_symbols and matches_usdt_perpetual(event.symbol):
+            if event.symbol in self._desired_symbols and event.pair_symbol != event.symbol:
                 self._reject_unverified_payload()
             return False
         aggregator = self._aggregators.get(event.symbol)
@@ -317,6 +330,7 @@ class LiquidationFlowService:
             self._untracked_symbol_event_count += 1
             return False
         accepted = aggregator.ingest(event, received_at=self.clock())
+        self.evidence.decoded(event.symbol, event.event_time, accepted=accepted)
         return accepted and 0 <= (self.clock() - event.event_time).total_seconds() <= self.stale_after_seconds
 
 

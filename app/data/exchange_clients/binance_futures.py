@@ -73,6 +73,8 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         )
         self._exchange_info_lock = asyncio.Lock()
         self._exchange_info_snapshot = None
+        self._funding_schedule_lock = asyncio.Lock()
+        self._funding_schedule_snapshot = None
 
     async def get_klines(self, symbol: str, interval: str, limit: int) -> list[CandleDTO]:
         delivery = await self._get_klines_delivery(symbol, interval, limit)
@@ -155,6 +157,10 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         payload, _ = await self._exchange_info()
         return copy.deepcopy(payload)
 
+    async def get_stream_contract_metadata(self, *, capture_clock=None):
+        payload, acquired = await self._exchange_info(capture_clock)
+        return copy.deepcopy(payload), acquired.acquired_at
+
     async def _exchange_info(self, capture_clock=None):
         async with self._exchange_info_lock:
             if self._exchange_info_snapshot is not None:
@@ -170,6 +176,22 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
 
     async def get_funding_rate(self, symbol: str) -> FundingDTO:
         return (await self.get_funding_rate_with_evidence(symbol)).value
+
+    async def get_funding_schedule_snapshot(self, *, capture_clock=None):
+        async with self._funding_schedule_lock:
+            if self._funding_schedule_snapshot is not None:
+                expires, snapshot = self._funding_schedule_snapshot
+                if time.monotonic() < expires:
+                    return copy.deepcopy(snapshot)
+            results = await asyncio.gather(self._get_json("/fapi/v1/fundingInfo"),
+                self._get_json("/fapi/v1/premiumIndex"), return_exceptions=True)
+            adjustments, schedules = (r if isinstance(r, list) and len(r) <= 10000 else [] for r in results)
+            acquisition = capture_acquisition(capture_clock or default_capture_clock)
+            if acquisition.acquired_at is None:
+                return None
+            snapshot = (acquisition.acquired_at, adjustments, schedules)
+            self._funding_schedule_snapshot = (time.monotonic()+60, snapshot)
+            return copy.deepcopy(snapshot)
 
     async def get_funding_rate_with_evidence(
         self,

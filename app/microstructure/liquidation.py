@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+from app.microstructure.websocket_protocol import exact_stream_symbol
 
 
 UM_STREAM_TYPE = 1
@@ -92,8 +93,11 @@ def parse_binance_liquidation(
             f"unsupported forceOrder stream type st={stream_type}"
         )
 
-    symbol = _text(order, "s").upper()
-    pair_symbol = _text(order if "ps" in order else payload, "ps").upper()
+    try:
+        symbol = exact_stream_symbol(order.get("s"))
+        pair_symbol = exact_stream_symbol((order if "ps" in order else payload).get("ps"))
+    except ValueError as exc:
+        raise LiquidationPayloadError("forceOrder literal contract identity invalid") from exc
     if "ps" in order and "ps" in payload and _text(payload, "ps").upper() != pair_symbol:
         raise LiquidationPayloadError("forceOrder conflicting ps identity fields")
     order_side = _text(order, "S").upper()

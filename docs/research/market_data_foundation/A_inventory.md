@@ -32,7 +32,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/data/exchange_clients/binance_futures.py:110` contains `"/fapi/v1/klines"`
+  - `app/data/exchange_clients/binance_futures.py:112` contains `"/fapi/v1/klines"`
   - `app/data/normalizers/binance.py:41` contains `volume=decimal_from(require_index(raw, 5, row_path)`
   - `app/cache/market_data_cache.py:61` contains `"candles": 60`
 
@@ -128,7 +128,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/data/exchange_clients/binance_futures.py:143` contains `"/fapi/v1/ticker/24hr"`
+  - `app/data/exchange_clients/binance_futures.py:145` contains `"/fapi/v1/ticker/24hr"`
   - `app/data/normalizers/bybit.py:79` contains `"bybit.ticker"`
   - `app/cache/market_data_cache.py:62` contains `"ticker": 15`
 
@@ -194,10 +194,10 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/data/derivatives_source_evidence.py:48` contains `"/fapi/v1/fundingRate"`
   - `app/data/derivatives_source_evidence.py:52` contains `"/v5/market/funding/history"`
-  - `app/pipeline/scanner_runner.py:2582` contains `async def _fetch_optional_market_data(`
-  - `app/pipeline/scanner_runner.py:4782` contains `def _derivatives_enrichment_input(`
-  - `app/pipeline/scanner_runner.py:4807` contains `def _derivatives_rejection(`
-  - `app/pipeline/scanner_runner.py:1777` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
+  - `app/pipeline/scanner_runner.py:2637` contains `async def _fetch_optional_market_data(`
+  - `app/pipeline/scanner_runner.py:4903` contains `def _derivatives_enrichment_input(`
+  - `app/pipeline/scanner_runner.py:4928` contains `def _derivatives_rejection(`
+  - `app/pipeline/scanner_runner.py:1830` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
 
 ## open_interest
 
@@ -324,7 +324,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified; code default order_book_liquidity_enabled false
 - expectancy_benefit: not established
 - code refs:
-  - `app/microstructure/order_book_service.py:103` contains `"/fapi/v1/depth"`
+  - `app/microstructure/order_book_service.py:104` contains `"/fapi/v1/depth"`
   - `app/core/config.py:99` contains `order_book_liquidity_enabled: bool = False`
 
 ## liquidations_binance_force_order
@@ -356,7 +356,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified; code default liquidation_flow_enabled false
 - expectancy_benefit: not established
 - code refs:
-  - `app/microstructure/liquidation.py:58` contains `def parse_binance_liquidation(`
+  - `app/microstructure/liquidation.py:59` contains `def parse_binance_liquidation(`
   - `app/core/config.py:96` contains `liquidation_flow_enabled: bool = False`
 
 ## btc_directional_context
@@ -421,7 +421,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - expectancy_benefit: not established
 - code refs:
   - `app/pipeline/scanner_runner.py:305` contains `market_regime_enabled: bool = False`
-  - `app/pipeline/scanner_runner.py:2119` contains `"ETHUSDT", "eth_candles"`
+  - `app/pipeline/scanner_runner.py:2172` contains `"ETHUSDT", "eth_candles"`
 
 ## btc_dominance
 

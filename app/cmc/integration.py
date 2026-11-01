@@ -74,7 +74,7 @@ async def evaluate_delivery_run(result, settings, *, candidate_builder, service=
                 "cci_original_decision_at": symbol_cutoff.isoformat(),
                 "cmc_selection_at": cutoff.isoformat(),
                 "evidence_knowledge_cutoff": symbol_cutoff.isoformat()}
-            if not candidate.cci_eligible or not candidate.is_new_signal:
+            if mode != Mode.SHADOW and (not candidate.cci_eligible or not candidate.is_new_signal):
                 evaluation=evaluate(candidate,(),mode=mode,as_of=cutoff,activations=activations)
                 records.append({"evaluation":evaluation.model_dump(mode="json"),"context":context,"features":[],"comparisons":[],
                     "native_observations":[],"application_status":"EVALUATED_NOT_DELIVERY_PROOF","batch_id":snapshot.batch_id})
