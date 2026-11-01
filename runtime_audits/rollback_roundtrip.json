@@ -1,0 +1,59 @@
+{
+  "label": "SYNTHETIC populated-state continuity; no production access",
+  "baseline": "0decc2158df59969b38a2d7441bec2441a3adc5b",
+  "implementation": "677181fab8a6bbff316b0d0a0c551cc82d1faab1",
+  "rollback": "911147cb7c0e1e5ece4a72c3ebda0a951f203d0c",
+  "phases": [
+    {
+      "phase": "baseline",
+      "schema": 27,
+      "epoch_preserved": true,
+      "mixed_payload_reads": 2,
+      "command_offset": 700,
+      "state_before_reads_sha256": "e019a318e996d1f4d2a99415113fcf9df797fba1bce19ec67eb343cfc07a2e8b",
+      "state_after_reads_sha256": "e019a318e996d1f4d2a99415113fcf9df797fba1bce19ec67eb343cfc07a2e8b",
+      "real_http_calls": 0,
+      "database": "SYNTHETIC-release-roundtrip.db"
+    },
+    {
+      "phase": "repair",
+      "schema": 27,
+      "epoch_preserved": true,
+      "mixed_payload_reads": 4,
+      "command_offset": 700,
+      "state_before_reads_sha256": "a727dfaf497d57e716356cf2b6d7a59e209e393374c9f0e752a796578ea72ee5",
+      "state_after_reads_sha256": "a727dfaf497d57e716356cf2b6d7a59e209e393374c9f0e752a796578ea72ee5",
+      "real_http_calls": 0,
+      "database": "SYNTHETIC-release-roundtrip.db"
+    },
+    {
+      "phase": "rollback",
+      "schema": 27,
+      "epoch_preserved": true,
+      "mixed_payload_reads": 4,
+      "command_offset": 700,
+      "state_before_reads_sha256": "a727dfaf497d57e716356cf2b6d7a59e209e393374c9f0e752a796578ea72ee5",
+      "state_after_reads_sha256": "a727dfaf497d57e716356cf2b6d7a59e209e393374c9f0e752a796578ea72ee5",
+      "real_http_calls": 0,
+      "database": "SYNTHETIC-release-roundtrip.db"
+    },
+    {
+      "phase": "restart",
+      "schema": 27,
+      "epoch_preserved": true,
+      "mixed_payload_reads": 4,
+      "command_offset": 700,
+      "state_before_reads_sha256": "13b6e3ccef992785bc93b736cc829fa43d600871bab136ea2c52d12d8b67e400",
+      "state_after_reads_sha256": "13b6e3ccef992785bc93b736cc829fa43d600871bab136ea2c52d12d8b67e400",
+      "real_http_calls": 0,
+      "database": "SYNTHETIC-release-roundtrip.db"
+    }
+  ],
+  "simulated_sends_on_rollback": 3,
+  "previously_sent_replayed": 0,
+  "uncertain_replayed": 0,
+  "offset_replay": 0,
+  "schema": 27,
+  "source_fixture": "tests/fixtures/release_roundtrip_probe.py",
+  "fixture_sha256": "11d2dcbee657a855d2e82a4e940fe84c77728df99e8253830c3d92fcfee411ff"
+}

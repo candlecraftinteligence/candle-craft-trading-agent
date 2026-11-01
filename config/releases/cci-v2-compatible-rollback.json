@@ -1,0 +1,10 @@
+{
+  "baseline": "0decc2158df59969b38a2d7441bec2441a3adc5b",
+  "rollback_commit": "911147cb7c0e1e5ece4a72c3ebda0a951f203d0c",
+  "rollback_tree": "5cab69aae6415b3a544291e3a52c5a830bb60c1b",
+  "branch": "codex/cci-v2-compatible-rollback",
+  "changed_files": [
+    "app/context/models.py"
+  ],
+  "behavior": "Accept UNVERIFIED as unreliable evidence; no research admission, schema, state, or transport change"
+}

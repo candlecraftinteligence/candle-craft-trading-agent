@@ -1,5 +1,9 @@
 # CCI V2 controlled rollout / rollback packet
 
+**SUPERSEDED operational proposal.** Use `CCI_V2_REPAIR_RELEASE_HANDOFF.md` for the
+current CMC-OFF code release and compatible rollback. This older packet is retained
+as implementation-phase history and must not be executed.
+
 **PREPARED IN DEV. NOT APPROVED OR EXECUTED.** Implementation release:
 `677181fab8a6bbff316b0d0a0c551cc82d1faab1`.
 

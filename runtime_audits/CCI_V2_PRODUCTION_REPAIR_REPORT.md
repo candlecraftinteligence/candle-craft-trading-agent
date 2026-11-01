@@ -1,5 +1,9 @@
 # CCI V2 production functionality repair and CMC activation
 
+Historical implementation-phase report. Current release finalization, compatible
+rollback R1 resolution and code-only CMC-OFF rollout are documented in
+`CCI_V2_REPAIR_RELEASE_HANDOFF.md`. Preserve the historical receipts below.
+
 Status: **DEV REPAIR VERIFIED AND COMMITTED — NOT DEPLOYED. Phase completion is not claimed.**
 
 This report concerns the owner-supplied 1 November 2026 fast live audit. The audit
