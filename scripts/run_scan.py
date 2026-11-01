@@ -2036,6 +2036,10 @@ def _combined_runtime_stats(
             if runtime_stats is not None
             else ScannerProcessMemoryStats()
         ),
+        derivatives_prefetch=runtime_stats.derivatives_prefetch if runtime_stats is not None else {},
+        stream_health=runtime_stats.stream_health if runtime_stats is not None else {},
+        analysis_worker=runtime_stats.analysis_worker if runtime_stats is not None else {},
+        cmc_acquisition=runtime_stats.cmc_acquisition if runtime_stats is not None else {},
     )
 
 

@@ -144,3 +144,120 @@ def test_assessment_reports_depth_band_coverage_separately_from_synchronization(
     evidence.assessed(UNICODE, snapshot)
     assessed = evidence.health({UNICODE})["per_symbol"][UNICODE]["assessment"]
     assert assessed["synchronized"] is True and assessed["all_depth_bands_complete"] is False
+
+
+def test_reconciliation_preserves_flow_warmup_and_real_id_gaps_require_new_coverage():
+    current = NOW + timedelta(seconds=10)
+
+    class Connection:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+    async def exercise():
+        nonlocal current
+        service = MicrostructureFlowService(clock=lambda: current)
+        await service.reconcile_symbols(["BTCUSDT"])
+        connection = Connection()
+        service._connection = connection
+        aggregator = service._aggregators["BTCUSDT"]
+        aggregator.mark_connected(current)
+        await service._send_subscription_diff(connection, additions={"BTCUSDT"}, removals=set())
+        service._handle_payload({"id": connection.sent[0]["id"], "result": None})
+        frozen = None
+        for minute in range(17):
+            current = NOW + timedelta(minutes=minute, seconds=10)
+            service.evidence.set_metadata(metadata("BTCUSDT"), current)
+            await service.reconcile_symbols(["BTCUSDT"])
+            payload = trade(100 + minute, current - timedelta(seconds=1))
+            # Underlying trade IDs are a different sequence from aggregate IDs.
+            payload.update(f=1000 + minute * 10, l=1000 + minute * 10 + 3)
+            assert service._handle_payload(payload)
+            snapshot = service.snapshot("BTCUSDT")
+            assert snapshot.gap_count == 0
+            assert (snapshot.status == ContextStatus.VERIFIED) is (minute == 16)
+            if minute == 5:
+                frozen = snapshot
+        assert frozen.status == ContextStatus.UNAVAILABLE
+        assert frozen.windows["15m"].coverage_complete is False
+        assert service._aggregators["BTCUSDT"] is aggregator
+        assert len(connection.sent) == 1
+        assert service.health()["acknowledged_symbol_count"] == 1
+
+        # A missing aggregate ID resets the whole canonical coverage window.
+        for minute in range(17, 34):
+            current = NOW + timedelta(minutes=minute, seconds=10)
+            service.evidence.set_metadata(metadata("BTCUSDT"), current)
+            assert service._handle_payload(trade(101 + minute, current - timedelta(seconds=1)))
+            snapshot = service.snapshot("BTCUSDT")
+            assert snapshot.gap_count == 1
+            if minute < 33:
+                assert snapshot.status == ContextStatus.UNAVAILABLE
+                assert snapshot.reason == "aggregate_trade_id_gap_in_window"
+            else:
+                assert snapshot.status == ContextStatus.VERIFIED
+        current += timedelta(seconds=service.stale_after_seconds + 1)
+        service.evidence.set_metadata(metadata("BTCUSDT"), current)
+        assert service.snapshot("BTCUSDT").status == ContextStatus.STALE
+
+    asyncio.run(exercise())
+
+
+def test_quiet_liquidation_windows_require_matching_ack_and_full_observed_coverage():
+    current = NOW
+
+    async def exercise():
+        nonlocal current
+        service = LiquidationFlowService(clock=lambda: current)
+        await service.reconcile_symbols(["BTCUSDT"])
+        service._connection = object()  # Injected connection; no socket/service is started.
+        service._connection_count = 1
+        service.evidence.requested(1, "SUBSCRIBE", {"BTCUSDT"})
+        service._handle_payload({"id": 2, "result": None})
+        current += timedelta(minutes=16)
+        service.evidence.set_metadata(metadata("BTCUSDT"), current)
+        missing = service.snapshot("BTCUSDT")
+        assert not service.health()["subscription_confirmed"]
+        assert all(window.event_count is None for window in missing.windows.values())
+        assert all(window.status != ContextStatus.VERIFIED for window in missing.windows.values())
+
+        service._handle_payload({"id": 1, "result": None})
+        connected_at = current
+        for minute in range(16):
+            current = connected_at + timedelta(minutes=minute)
+            service.evidence.set_metadata(metadata("BTCUSDT"), current)
+            await service.reconcile_symbols(["BTCUSDT"])
+            snapshot = service.snapshot("BTCUSDT")
+            assert (snapshot.status == ContextStatus.VERIFIED) is (minute == 15)
+            canonical = snapshot.windows["15m"]
+            assert canonical.event_count == (0 if minute == 15 else None)
+            assert canonical.total_liquidation_quote == (0 if minute == 15 else None)
+        assert service.health()["subscription_scope"] == "all_markets"
+        assert service.health()["acknowledged_symbol_count"] == 1
+        service._invalidate_stream()
+        assert all(window.event_count is None for window in service.snapshot("BTCUSDT").windows.values())
+
+    asyncio.run(exercise())
+
+
+def test_frozen_book_assessment_does_not_freshen_or_mutate_after_new_depth():
+    from tests.test_order_book_liquidity import _synchronized_book
+
+    book = _synchronized_book()
+    frozen = book.snapshot(as_of=NOW)
+    assert frozen.status == ContextStatus.VERIFIED
+    late = NOW + timedelta(seconds=6)
+    assert book.snapshot(as_of=late).status == ContextStatus.STALE
+    book.ingest(parse_binance_depth_event(depth(
+        first=102, final=103, previous=101, event_ms=int(late.timestamp() * 1000),
+        bids=[["99.99", "2"]],
+    )), received_at=late)
+    refreshed = book.snapshot(as_of=late)
+    assert refreshed.status == ContextStatus.VERIFIED
+    assert refreshed.observed_at == late
+    assert frozen.observed_at == NOW
+    assert frozen.bands["10bps"].bid_quote_notional != refreshed.bands["10bps"].bid_quote_notional
+    book.mark_disconnected()
+    assert book.snapshot(as_of=late).status != ContextStatus.VERIFIED
