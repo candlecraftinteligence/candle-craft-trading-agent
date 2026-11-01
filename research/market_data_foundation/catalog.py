@@ -201,10 +201,10 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "code_refs": (
             {"path": "app/data/derivatives_source_evidence.py", "line": 48, "contains": '"/fapi/v1/fundingRate"'},
             {"path": "app/data/derivatives_source_evidence.py", "line": 52, "contains": '"/v5/market/funding/history"'},
-            {"path": "app/pipeline/scanner_runner.py", "line": 2561, "contains": "async def _fetch_optional_market_data("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4761, "contains": "def _derivatives_enrichment_input("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4786, "contains": "def _derivatives_rejection("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 1761, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
+            {"path": "app/pipeline/scanner_runner.py", "line": 2582, "contains": "async def _fetch_optional_market_data("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4782, "contains": "def _derivatives_enrichment_input("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4807, "contains": "def _derivatives_rejection("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 1777, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
         ),
     },
     {
@@ -435,7 +435,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/pipeline/scanner_runner.py", "line": 305, "contains": "market_regime_enabled: bool = False"},
-            {"path": "app/pipeline/scanner_runner.py", "line": 2103, "contains": '"ETHUSDT", "eth_candles"'},
+            {"path": "app/pipeline/scanner_runner.py", "line": 2119, "contains": '"ETHUSDT", "eth_candles"'},
         ),
     },
     {
