@@ -215,7 +215,7 @@ class OrderBookLiquidityService:
         self.receive_timeout_seconds = float(receive_timeout_seconds)
         self.reconnect_reset_seconds = float(reconnect_reset_seconds)
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.evidence = StreamEvidence(self.clock)
+        self.evidence = StreamEvidence(self.clock, on_admission_change=self._metadata_admission_changed)
         self.monotonic = monotonic or time.monotonic
         self.sleep = sleep or asyncio.sleep
         self.jitter = jitter or (lambda maximum: random.uniform(0.0, maximum))
@@ -297,6 +297,19 @@ class OrderBookLiquidityService:
         self._active_symbols.clear()
         for book in self._books.values():
             book.mark_disconnected()
+
+    def _metadata_admission_changed(self, symbol, valid):
+        book = self._books.get(symbol)
+        if book is None:
+            return
+        if not valid:
+            book.mark_disconnected()
+            task = self._bootstrap_tasks.pop(symbol, None)
+            if task is not None:
+                task.cancel()
+        elif self._connection is not None:
+            book.mark_connected(reconnect=True)
+            self._schedule_bootstrap(symbol)
 
     async def reconcile_symbols(self, symbols: Sequence[str]) -> tuple[str, ...]:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
@@ -490,6 +503,10 @@ class OrderBookLiquidityService:
         if book is None or event.symbol not in self._desired_symbols:
             self._ignored_message_count += 1
             return False
+        if not self.evidence.accepts_event_times(event.symbol, event.event_time, event.transaction_time,
+                max_age=self.stale_after_seconds):
+            self.evidence.decoded(event.symbol, event.event_time, accepted=False)
+            return False
         outcome = book.ingest(event, received_at=self.clock())
         self.evidence.decoded(event.symbol, event.event_time, accepted=outcome in {
             BookIngestOutcome.SYNCHRONIZED, BookIngestOutcome.APPLIED})
@@ -533,6 +550,7 @@ class OrderBookLiquidityService:
         if (
             book is not None
             and book.needs_resync
+            and self.evidence.identity_reason(symbol) is None
             and self._connection is not None
             and not self._stop_event.is_set()
         ):
@@ -567,6 +585,9 @@ class OrderBookLiquidityService:
                     ):
                         return
                     snapshot = parse_binance_depth_snapshot(payload)
+                    if not all(0 <= (self.clock() - at).total_seconds() <= self.stale_after_seconds
+                            for at in (snapshot.event_time, snapshot.transaction_time)):
+                        raise OrderBookPayloadError("depth_snapshot_stale_or_future")
                     outcome = book.install_snapshot(snapshot, received_at=self.clock())
                     if outcome != BookIngestOutcome.NEEDS_RESYNC:
                         return
@@ -623,6 +644,9 @@ class OrderBookLiquidityService:
             and not self._stop_event.is_set()
             and symbol in self._desired_symbols
             and self._books.get(symbol) is book
+            # A cancelled request must not install into a recovered collector.
+            and self._bootstrap_tasks.get(symbol) is asyncio.current_task()
+            and self.evidence.identity_reason(symbol) is None
         )
 
     async def _wait_for_snapshot_slot(self) -> None:

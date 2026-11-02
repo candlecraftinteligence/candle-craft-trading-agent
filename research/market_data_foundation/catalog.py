@@ -34,7 +34,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 112, "contains": '"/fapi/v1/klines"'},
+            {"path": "app/data/exchange_clients/binance_futures.py", "line": 115, "contains": '"/fapi/v1/klines"'},
             {"path": "app/data/normalizers/binance.py", "line": 41, "contains": "volume=decimal_from(require_index(raw, 5, row_path)"},
             {"path": "app/cache/market_data_cache.py", "line": 61, "contains": '"candles": 60'},
         ),
@@ -133,7 +133,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 145, "contains": '"/fapi/v1/ticker/24hr"'},
+            {"path": "app/data/exchange_clients/binance_futures.py", "line": 148, "contains": '"/fapi/v1/ticker/24hr"'},
             {"path": "app/data/normalizers/bybit.py", "line": 79, "contains": '"bybit.ticker"'},
             {"path": "app/cache/market_data_cache.py", "line": 62, "contains": '"ticker": 15'},
         ),
@@ -202,8 +202,8 @@ INVENTORY: tuple[dict[str, Any], ...] = (
             {"path": "app/data/derivatives_source_evidence.py", "line": 48, "contains": '"/fapi/v1/fundingRate"'},
             {"path": "app/data/derivatives_source_evidence.py", "line": 52, "contains": '"/v5/market/funding/history"'},
             {"path": "app/pipeline/scanner_runner.py", "line": 2637, "contains": "async def _fetch_optional_market_data("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4903, "contains": "def _derivatives_enrichment_input("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4928, "contains": "def _derivatives_rejection("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4907, "contains": "def _derivatives_enrichment_input("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4932, "contains": "def _derivatives_rejection("},
             {"path": "app/pipeline/scanner_runner.py", "line": 1830, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
         ),
     },
