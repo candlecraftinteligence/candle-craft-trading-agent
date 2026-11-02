@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.alerts.templates import TELEGRAM_MAX_MESSAGE_LENGTH, split_message
+from app.alerts.telegram_rich_message import is_rich_message, rich_message_html
 
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 DEFAULT_TELEGRAM_TIMEOUT = 10.0
@@ -22,7 +23,7 @@ async def send_telegram_messages(
     timeout: float = DEFAULT_TELEGRAM_TIMEOUT,
     max_message_length: int = TELEGRAM_MAX_MESSAGE_LENGTH,
 ) -> tuple[dict[str, Any], ...]:
-    """Send a plain-text Telegram alert, splitting oversized messages safely."""
+    """Send an alert, splitting plain text and keeping rich messages atomic."""
 
     chunks = split_message(message, max_message_length)
     results: list[dict[str, Any]] = []
@@ -56,16 +57,30 @@ async def send_telegram_message_part(
 ) -> dict[str, Any]:
     """Send one durable outbox part and classify whether non-acceptance is proven."""
 
-    close_client = http_client is None
-    client = http_client or httpx.AsyncClient(base_url=api_base_url, timeout=timeout)
+    method = "sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": message,
         "disable_web_page_preview": True,
     }
+    if is_rich_message(message):
+        try:
+            html = rich_message_html(message)
+            if part_number != 1 or total_parts != 1:
+                raise ValueError("Rich messages must be atomic")
+        except ValueError:
+            return _failure(
+                part_number=part_number, total_parts=total_parts,
+                error="Invalid atomic rich-message payload.",
+                delivery_state="FAILED_FINAL", error_category="invalid_rich_message",
+            )
+        method = "sendRichMessage"
+        payload = {"chat_id": chat_id, "rich_message": {"html": html, "skip_entity_detection": True}}
+    close_client = http_client is None
+    client = http_client or httpx.AsyncClient(base_url=api_base_url, timeout=timeout)
     try:
         try:
-            response = await client.post(f"/bot{bot_token}/sendMessage", json=payload)
+            response = await client.post(f"/bot{bot_token}/{method}", json=payload)
         except (httpx.ConnectTimeout, httpx.ConnectError, httpx.PoolTimeout):
             return _failure(
                 part_number=part_number,

@@ -174,12 +174,20 @@ class TelegramSignalMessage:
     was_watchlist: bool = False
     zone_active: bool = False
     coalesced_milestones: tuple[Any, ...] = ()
+    market_exchange: Any = NA
 
 def format_telegram_signal_message(
     alert_type: TelegramAlertType | str,
     message: TelegramSignalMessage,
+    *,
+    presentation: str = "legacy",
 ) -> str:
     normalized = alert_type if isinstance(alert_type, TelegramAlertType) else TelegramAlertType(str(alert_type))
+    if presentation == "precision":
+        from app.formatters.telegram_precision_brief import format_precision_brief
+        return format_precision_brief(normalized, message)
+    if presentation != "legacy":
+        raise ValueError(f"Unsupported Telegram signal presentation: {presentation}")
     if normalized == TelegramAlertType.RESEARCH_WATCH:
         return format_research_watch_message(message)
     if normalized == TelegramAlertType.WATCHLIST:

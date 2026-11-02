@@ -7,6 +7,7 @@ from typing import Any
 
 from app.data.dtos import NA
 from app.core.trade_plan_integrity import validate_public_trade_plan
+from app.alerts.telegram_rich_message import is_rich_message, rich_message_html
 
 CANDLE_CRAFT_SIGNATURE = "Candle Craft | Signal. Structure. Execution."
 DEFAULT_RISK_WARNING = (
@@ -37,10 +38,15 @@ def format_trade_alert(trade_idea: Any) -> str:
 
 
 def split_message(message: str, max_length: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> tuple[str, ...]:
-    """Split long plain-text messages at readable boundaries."""
+    """Split plain text at readable boundaries; keep versioned rich bodies atomic."""
 
     if max_length <= 0:
         raise ValueError("max_length must be greater than zero")
+    if is_rich_message(message):
+        rich_message_html(message)
+        if len(message) > max_length:
+            raise ValueError("A rich Telegram message cannot be split across outbox parts")
+        return (message,)
     if len(message) <= max_length:
         return (message,)
 
