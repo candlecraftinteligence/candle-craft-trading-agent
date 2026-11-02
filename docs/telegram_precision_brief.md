@@ -23,8 +23,13 @@ The owner selected the map-first preview on 2026-11-02. Its order is:
 2. **TRADE MAP**: compact ENTRY / SL / TP1 / TP2 / TP3 table.
 3. **WHAT HAPPENED**: native quote containing the stored sweep wick, swing level,
    structural candle close and break level/timeframe, when available.
-4. **ENTRY PLAN**: wait for the actual mapped range; an already engaged zone is
-   described as engaged instead of requesting another touch.
+4. **ENTRY PLAN**: wait for the actual mapped range, then look for a clear
+   reaction in the setup direction. Warn about stalling in the zone or trading
+   beyond its adverse edge without a convincing directional push. Longs use
+   bullish / below / higher; shorts use bearish / above / lower. An already
+   engaged zone is described as engaged instead of requesting another touch.
+   This is qualitative observation guidance, not a new automated confirmation
+   gate, reaction threshold, timeframe or invalidation rule.
 5. **INVALIDATION**: the existing hard-stop price-contact rule, unchanged.
 6. One risk line, TradingView and Copy levels buttons.
 
@@ -155,7 +160,7 @@ message is sent by this phase.
 - Base: merged `main` at `227d82b`.
 - Branch: `feature/telegram-confirmed-channel-brief`.
 - Scope: precision formatter, its regression tests and this guide only.
-- Focused precision formatting/delivery suite: **58 passed**.
+- Focused precision formatting/delivery suite: see the latest result in the PR.
 - Full-suite and CI receipts are recorded in the follow-up PR.
 - Verification includes canonical-context prices and target warnings, missing
   and reversed entry ranges, an already touched zone, unchanged contact-based

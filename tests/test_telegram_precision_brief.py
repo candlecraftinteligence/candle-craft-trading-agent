@@ -91,7 +91,7 @@ def test_effective_context_levels_override_message_without_changing_geometry():
                                    stop_loss=Decimal("90"), tp1=Decimal("110"), tp2=Decimal("120"), tp3=Decimal("130"))
     html = render(signal_context=context)
     assert "100 – 101" in html and "255.33" not in html
-    assert "Wait for price to return to 100 – 101." in html
+    assert "Wait for price to return to 100 – 101, then look for a clear bullish reaction." in html
     assert "hard stop on price contact at or below 90" in html
     assert "Entry-zone evidence: Unverified (does not match the stored plan)." in html
 
@@ -99,15 +99,40 @@ def test_effective_context_levels_override_message_without_changing_geometry():
 def test_confirmed_entry_plan_names_the_zone_without_requiring_confirmation_again():
     html = render()
     assert "<b>CONFIRMED</b>" in html
-    assert "Wait for price to return to 255.33 – 256.2." in html
+    assert "Wait for price to return to 255.33 – 256.2, then look for a clear bullish reaction." in html
+    assert "If price stalls in the zone or trades below it without a convincing push higher, treat the entry with caution." in html
     assert "5m close above 256.8." not in html
     assert "body-closes" not in html and "accepts below" not in html
 
 
 def test_already_engaged_zone_does_not_tell_readers_to_wait_for_a_touch_or_claim_a_fill():
     html = render(zone_active=True)
-    assert "Entry zone 255.33 – 256.2 engaged. Actual exchange fill: Unverified." in html
+    assert "Entry zone 255.33 – 256.2 engaged. Look for a clear bullish reaction." in html
+    assert "treat the entry with caution. Actual exchange fill: Unverified." in html
     assert "Wait for price to return" not in html
+
+
+@pytest.mark.parametrize("zone_active", [False, True])
+def test_short_entry_reaction_warning_is_mirrored_and_keeps_the_full_caution(zone_active):
+    html = render(direction="short", zone_active=zone_active)
+    assert "look for a clear bearish reaction." in html.lower()
+    assert "If price stalls in the zone or trades above it without a convincing push lower, treat the entry with caution." in html
+    assert "bullish reaction" not in html and "push higher" not in html
+    assert "hard stop on price contact at or above 250.06" in html
+
+
+@pytest.mark.parametrize("direction", [None, "N/A", "unknown"])
+def test_missing_reaction_direction_does_not_invent_a_bullish_or_bearish_condition(direction):
+    html = render(direction=direction)
+    assert "Reaction direction: N/A." in html
+    entry_plan = html.split("<h4>ENTRY PLAN</h4>", 1)[1].split("<h4>INVALIDATION</h4>", 1)[0]
+    assert "bullish" not in entry_plan and "bearish" not in entry_plan
+
+
+def test_entry_reaction_direction_comes_from_canonical_context():
+    html = render(signal_context=SignalMessageContext(direction="short"))
+    assert "look for a clear bearish reaction." in html
+    assert "trades above it without a convincing push lower" in html
 
 
 @pytest.mark.parametrize("low,high", [(None, Decimal("256.2")), (Decimal("256.2"), None),

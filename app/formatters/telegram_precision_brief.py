@@ -103,9 +103,21 @@ def _entry_plan(message: TelegramSignalMessage, confirmed: bool) -> str:
         if low is None or high is None or low > high:
             return "Entry plan: N/A (stored entry zone unavailable/inconsistent)."
         entry = _levels(message)[0][1]
-        if message.zone_active:
-            return f"Entry zone {entry} engaged. Actual exchange fill: Unverified."
-        return f"Wait for price to return to {entry}."
+        direction = format_direction(_first_display(context.direction, message.direction))
+        reaction = {"LONG": ("bullish", "below", "higher"), "SHORT": ("bearish", "above", "lower")}.get(direction)
+        if reaction is None:
+            start = f"Entry zone {entry} engaged." if message.zone_active else f"Wait for price to return to {entry}."
+            plan = f"{start} Reaction direction: N/A."
+        else:
+            bias, adverse_side, movement = reaction
+            start = (
+                f"Entry zone {entry} engaged. Look for a clear {bias} reaction."
+                if message.zone_active else
+                f"Wait for price to return to {entry}, then look for a clear {bias} reaction."
+            )
+            plan = (f"{start} If price stalls in the zone or trades {adverse_side} it without a convincing "
+                    f"push {movement}, treat the entry with caution.")
+        return f"{plan} Actual exchange fill: Unverified." if message.zone_active else plan
     reason = safe_reason_text(message.confirmation_needed)
     return "Confirmation required: N/A in stored context." if reason == NA else reason
 
@@ -137,7 +149,7 @@ def format_precision_brief(alert_type: TelegramAlertType, message: TelegramSigna
     html += "".join(f'<tr><td>{label}</td><td align="right"><code>{_text(price, 64)}</code></td></tr>' for label, price in levels)
     html += "</table>"
     html += "<blockquote><b>WHAT HAPPENED</b><br>" + "<br>".join(_text(line) for line in lines) + "</blockquote>"
-    html += f"<h4>ENTRY PLAN</h4><p>{_text(_entry_plan(message, confirmed))}</p>"
+    html += f"<h4>ENTRY PLAN</h4><p>{_text(_entry_plan(message, confirmed), 420)}</p>"
     # Keep the engine's price-contact rule; never turn it into a candle-close rule.
     invalidation = _public_compact_invalidation_line(message).removeprefix("Invalidation: ")
     html += f"<h4>INVALIDATION</h4><p>{_text(invalidation)}</p>"
