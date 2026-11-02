@@ -3,8 +3,8 @@
 ## Purpose and implementation plan
 
 Replace repetitive public signal copy with a compact, evidence-led presentation:
-the observed sweep/structure, remaining entry condition, unchanged economic
-levels, visible invalidation, optional source context, and useful native buttons.
+the unchanged trade map, observed sweep/structure, entry plan, visible
+invalidation, and useful native buttons.
 Lifecycle updates describe only the new tracked event.
 
 1. Add a deterministic presentation beside the existing legacy formatter.
@@ -15,12 +15,52 @@ Lifecycle updates describe only the new tracked event.
    reservation, recovery, duplicate prevention and the existing suite.
 5. Review in a feature-branch PR. Merge and runtime rollout remain owner actions.
 
+## Selected channel layout — option 1
+
+The owner selected the map-first preview on 2026-11-02. Its order is:
+
+1. Wolf, symbol, direction and **CONFIRMED** status.
+2. **TRADE MAP**: compact ENTRY / SL / TP1 / TP2 / TP3 table.
+3. **WHAT HAPPENED**: native quote containing the stored sweep wick, swing level,
+   structural candle close and break level/timeframe, when available.
+4. **ENTRY PLAN**: wait for the actual mapped range; an already engaged zone is
+   described as engaged instead of requesting another touch.
+5. **INVALIDATION**: the existing hard-stop price-contact rule, unchanged.
+6. One risk line, TradingView and Copy levels buttons.
+
+Remove the secondary evidence disclosure, bias/derivatives metadata and the
+extra observed-setup footer from the initial post. Material target warnings and
+missing or contradictory evidence remain visible. There are no recurring hunt
+slogans; the wolf header supplies the CCI identity.
+
+Short updates say **ENTRY ZONE ENGAGED**, **TP1/TP2/TP3 HIT**, or **SL HIT**, give
+the recorded level and next target/closure, and retain the tracking disclaimer.
+They do not repeat the full map. Existing invalidation, expiry and reference
+breakeven notifications remain supported for lifecycle integrity.
+
+The formatter does not admit messages to the channel. Existing delivery policy
+continues to block unconfirmed WATCHLISTED, STALKING and TRIGGERED candidates;
+the precision presentation cannot promote them. Private/research rendering
+retains honest pending-state labels if those alert types are explicitly used.
+
+The concept's candle events are fictional example data. They are never inserted
+into a real signal or used to fill missing evidence. Telegram controls native
+colors, type sizes, table borders and spacing; the visual concept is not a
+pixel-level client styling contract.
+
 ## Activation and rollback
 
 `TELEGRAM_SIGNAL_PRESENTATION=precision` selects the new format for newly
 created public signal/lifecycle messages. The default is `legacy`, allowing a
 controlled rollout and explicit comparison before changing public delivery.
 Research-watch messages keep their existing format.
+
+After this PR is reviewed and merged, update stable main on the runtime PC and
+set `TELEGRAM_SIGNAL_PRESENTATION=precision` in its local `.env`. Restart the
+existing runtime processes using their normal workflow so they load the new
+code and setting; do not launch a second listener. Changing GitHub alone does
+not update a running process. Do not change delivery-enabled/dry-run values,
+credentials, the active watchlist or the runtime database for this rollout.
 
 The new presentation uses Telegram Bot API rich-message support (10.1+) and
 the supported rich HTML table, details, heading and button elements. Actual
@@ -42,8 +82,8 @@ ambiguous acceptance.
   Unverified. No generic checklist is converted into invented confirmations.
 - Canonical context supplies the plan. Conflicting entry-zone evidence is
   marked Unverified instead of narrating an overlap with a different plan.
-- Invalidation, pending entry condition, target caution and risk warning remain
-  visible. Only supporting context is collapsed.
+- Invalidation, entry plan, target caution and risk warning remain visible.
+  Removed metadata never hides a blocker or replaces missing market evidence.
 - A zone touch does not prove an entry fill. TP/SL and breakeven refer to tracked
   setup events; actual fills and realized results remain Unverified.
 - Rich HTML, buttons and chart link form one versioned, hashed, atomic outbox
@@ -92,7 +132,7 @@ Automated checks mock the Telegram HTTP boundary. Native Telegram rendering
 and TradingView phone handoff require the device checks above. No public test
 message is sent by this phase.
 
-### Verification record — 2026-11-02
+### Original implementation verification — PR #171
 
 - Base: `main` at `1d16314`. Branch: `feature/telegram-precision-brief`.
 - Full `python -m pytest`: 4,603 passed, 2 failed, 1 existing dependency warning.
@@ -105,8 +145,23 @@ message is sent by this phase.
 - New feature tests plus both corrective rechecks: **46 passed** (44 new tests).
 - `git diff --check`: clean. Strategy, scoring, setup geometry, confirmation
   gates, minimum RR and database schema files are unchanged.
-- Native-client rendering and phone handoff are not yet verified; keep the PR
-  in draft until the private-preview review. No production activation occurred.
+- PR #171 was merged after successful Linux and Windows CI. A single private
+  preview subsequently demonstrated native table, quote, disclosure and button
+  rendering on Telegram Desktop. Phone handoff remains unverified. No production
+  activation occurred in the development environment.
+
+### Selected-layout follow-up — 2026-11-02
+
+- Base: merged `main` at `227d82b`.
+- Branch: `feature/telegram-confirmed-channel-brief`.
+- Scope: precision formatter, its regression tests and this guide only.
+- Focused precision formatting/delivery suite: **58 passed**.
+- Full-suite and CI receipts are recorded in the follow-up PR.
+- Verification includes canonical-context prices and target warnings, missing
+  and reversed entry ranges, an already touched zone, unchanged contact-based
+  stops, unconfirmed admission blocking and persisted-payload recovery.
+- No strategy, quality gate, lifecycle transition, transport, settings default,
+  schema, `.env` or runtime database changes.
 
 References:
 
