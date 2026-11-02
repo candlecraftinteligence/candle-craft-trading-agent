@@ -4649,7 +4649,9 @@ class TelegramLifecycleDeliveryService:
                     eligibility_context=context,
                 )
 
-        message_text = format_telegram_signal_message(decision.alert_type, message)
+        message_text = format_telegram_signal_message(
+            decision.alert_type, message, presentation=self.settings.telegram_signal_presentation,
+        )
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
         transition = decision.lifecycle_transition
         previous_state = transition.from_state.value if transition and transition.from_state else NA
@@ -5306,7 +5308,9 @@ class TelegramLifecycleDeliveryService:
             )
         event_type = alert_type.value
         event_key = _public_watchlist_event_key(plan.plan_id, event_type)
-        message_text = format_telegram_signal_message(alert_type, message)
+        message_text = format_telegram_signal_message(
+            alert_type, message, presentation=self.settings.telegram_signal_presentation,
+        )
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
         attempted_at = now_utc_iso()
         public_plan_fields = _public_watchlist_record_plan_fields(
@@ -5603,7 +5607,9 @@ class TelegramLifecycleDeliveryService:
                 detail="Duplicate Telegram watchlist outcome update prevented.",
             )
 
-        message_text = format_telegram_signal_message(alert_type, message)
+        message_text = format_telegram_signal_message(
+            alert_type, message, presentation=self.settings.telegram_signal_presentation,
+        )
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
         repository.commit_before_network_activity()
         send_result = await self.sender.send_text(
@@ -5683,7 +5689,9 @@ class TelegramLifecycleDeliveryService:
         scan_run_id: str | None,
         eligibility_context: TelegramEligibilityContext,
     ) -> TelegramLifecycleDelivery:
-        message_text = format_telegram_signal_message(outcome.alert_type, outcome.message)
+        message_text = format_telegram_signal_message(
+            outcome.alert_type, outcome.message, presentation=self.settings.telegram_signal_presentation,
+        )
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
         repository.commit_before_network_activity()
         send_result = await self.sender.send_text(
@@ -5992,6 +6000,7 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
     )
     message = TelegramSignalMessage(
         symbol=symbol_result.symbol,
+        market_exchange=_first_non_na(getattr(trade_idea, "exchange", NA), diagnostics.get("exchange")),
         direction=direction,
         signal_id=_signal_id(symbol_result),
         mode=mode,

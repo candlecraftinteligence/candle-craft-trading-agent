@@ -112,6 +112,7 @@ class Settings(BaseSettings):
 
     cmc_collection_profile: Literal["FULL_RESEARCH", "DECISION_FOCUSED", "LOW_CREDIT", "RUNTIME_SHADOW", "CUSTOM"] = "FULL_RESEARCH"
     cmc_collection_profile_path: Path | None = None
+    telegram_signal_presentation: Literal["legacy", "precision"] = "legacy"
 
     model_config = SettingsConfigDict(
         env_file=".env",
