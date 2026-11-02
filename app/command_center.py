@@ -72,6 +72,10 @@ def build_command_center_payload(
             "cache_efficiency": _cache_efficiency(cache_stats),
             "runtime_warnings": list(runtime_warnings),
             "process_memory": runtime.process_memory.model_dump(mode="json"),
+            "derivatives_prefetch": runtime.derivatives_prefetch,
+            "stream_health": runtime.stream_health,
+            "analysis_worker": runtime.analysis_worker,
+            "cmc_acquisition": runtime.cmc_acquisition,
         },
         "performance_memory_summary": _performance_memory_payload(result),
     }
