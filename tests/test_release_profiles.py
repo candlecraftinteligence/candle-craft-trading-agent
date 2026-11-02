@@ -6,13 +6,25 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from scripts.cci_v2_release_profiles import reviewed_profile, launch_profile
+from app.operations.release_activation import digest
 
 pytestmark = pytest.mark.no_auto_epoch
+APPROVAL_AT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def exact_approval(profile, contract, role="scanner"):
+    return {"schema":"cci-feature-approval/1", "role":role,"release_sha":profile["release_sha"],
+        "candidate_tree":profile["candidate_tree"],"expected_identity":profile["expected_identity"],
+        "profile_sha256":digest(profile),"contract_sha256":digest(contract),
+        "activation_sha256":digest(profile.get("_activation")),"changes":{},
+        "issued_at":APPROVAL_AT.isoformat(),"expires_at":(APPROVAL_AT+timedelta(hours=1)).isoformat(),
+        "owner_approval_ref":"SYNTHETIC-ONLY"}
 
 
 def synthetic(role="scanner"):
@@ -24,8 +36,15 @@ def synthetic(role="scanner"):
         "approval_state":"OLD_APPROVAL", "owner_approved_release":"a"*40, "ci":"old-ci"}
     raw=json.dumps(profile).encode()
     contract={"baseline":"a"*40,"implementation":"b"*40,"rollback":"c"*40,"state_root":"SYNTHETIC-STATE",
+        "release_trees":{"b"*40:"d"*40,"c"*40:"d"*40},
         "expected_identity":profile["expected_identity"],"repository":"SYNTHETIC-REPO",
         "profiles":{role:{"sha256":hashlib.sha256(raw).hexdigest(),"arguments":profile["scanner_args" if role=="scanner" else "listener_args"]}}}
+    contract["rollback_compatibility"] = {"release_sha":"c"*40,"candidate_tree":"d"*40,"status":"PASS",
+        "owner_approval_ref":"SYNTHETIC-ONLY","inventory_complete":True,
+        "tested_formats":["plain_text","CCI_RICH_MESSAGE_V1"],"tested_routes":["sendMessage","sendRichMessage"],
+        "reservations_unchanged":True,"canonical_dedup_preserved":True,"telegram_offset_preserved":True,
+        "uncertain_never_replayed":True,"current_inventory_matches":True,
+        "inventory_sha256":"0"*64,"roundtrip_receipt_sha256":"1"*64}
     return profile,raw,contract
 
 
@@ -43,7 +62,7 @@ def test_exact_profile_derivation_preserves_every_override_argument_and_epoch(ro
         calls.append((args,kwargs))
         return SimpleNamespace(pid=123)
     launch_profile(profile=proposed,role=role,contract=contract,
-        approval={"release_sha":release,"owner_approval_ref":"SYNTHETIC-ONLY"},processes=[],
+        approval=exact_approval(proposed,contract,role),processes=[],now=APPROVAL_AT,
         deployed_sha=release,deployed_tree="d"*40,popen=fake)
     assert len(calls)==1
     args,options=calls[0]
@@ -71,7 +90,7 @@ def test_changed_active_profile_is_rejected(fault):
 def test_start_refuses_unsafe_or_competing_owner_before_popen(fault):
     profile,raw,contract=synthetic()
     proposed=reviewed_profile(raw,role="scanner",contract=contract,release="b"*40,tree="d"*40)
-    approval={"release_sha":"b"*40,"owner_approval_ref":"SYNTHETIC-ONLY"}
+    approval=exact_approval(proposed,contract)
     processes=[]
     if fault=="owner":processes=[{"CommandLine":"python scripts/run_scan.py --watch"}]
     if fault=="approval":approval={}
@@ -83,7 +102,7 @@ def test_start_refuses_unsafe_or_competing_owner_before_popen(fault):
     def forbidden(*a,**k):pytest.fail("Unsafe launch reached process creation")
     with pytest.raises(ValueError):
         launch_profile(profile=proposed,role="scanner",contract=contract,approval=approval,processes=processes,
-                       deployed_sha="b"*40,deployed_tree="d"*40,popen=forbidden)
+                       deployed_sha="b"*40,deployed_tree="d"*40,popen=forbidden,now=APPROVAL_AT)
 
 
 @pytest.mark.skipif(os.name != "nt",reason="Windows PowerShell parser and DEV host guard")

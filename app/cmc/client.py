@@ -114,6 +114,8 @@ class CmcClient:
         limit = int(params.get("limit", 100))
         start = int(params.get("start", 1))
         seen = set()
+        identities = set()
+        declared_count = None
         for page in range(max_pages):
             result = await self.get(endpoint, {**params, "start": start + page * limit, "limit": limit})
             if result.error:
@@ -129,7 +131,30 @@ class CmcClient:
                 yield result.model_copy(update={"state":EvidenceState.ERROR,"error":"repeated_pagination_page"})
                 return
             seen.add(fingerprint)
-            complete=len(items) < limit or (isinstance(result.data, dict) and result.data.get("has_more") is False)
+            if endpoint in {Endpoint.MAP, Endpoint.EXCHANGE_PAIRS, Endpoint.CRYPTO_PAIRS}:
+                from app.cmc.acquisition import page_identity
+                keys = [page_identity(endpoint, item) if isinstance(item, dict) else None for item in items]
+                if (any(isinstance(k, bool) or not isinstance(k, int) or k <= 0 for k in keys)
+                        or len(set(keys)) != len(keys) or identities.intersection(keys)):
+                    yield result.model_copy(update={"state":EvidenceState.ERROR,"error":"duplicate_or_invalid_page_identity"})
+                    return
+                identities.update(keys)
+            more = result.data.get("has_more") if isinstance(result.data, dict) else None
+            count = result.data.get("num_market_pairs") if isinstance(result.data, dict) and endpoint in {
+                Endpoint.EXCHANGE_PAIRS, Endpoint.CRYPTO_PAIRS} else None
+            if count is not None:
+                if (isinstance(count,bool) or not isinstance(count,int) or count < 0
+                        or declared_count is not None and count != declared_count):
+                    yield result.model_copy(update={"state":EvidenceState.ERROR,"error":"pagination_total_changed_or_invalid"})
+                    return
+                declared_count = count
+            consumed = start - 1 + page*limit + len(items)
+            contradictory = (len(items) > limit or count is not None and
+                (consumed > count or more is False and consumed < count or more is True and consumed >= count))
+            if contradictory or (count is not None and consumed < count and len(items) < limit):
+                yield result.model_copy(update={"state":EvidenceState.ERROR,"error":"pagination_count_conflict"})
+                return
+            complete = consumed == count if count is not None else more is False or (more is None and len(items) < limit)
             yield result.model_copy(update={"pagination_complete":True if complete else False if page+1==max_pages else None})
             if complete:
                 return

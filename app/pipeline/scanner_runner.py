@@ -331,6 +331,7 @@ class ScannerRunConfig(BaseModel):
     native_derivatives_snapshot: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     funding_schedule_snapshot: Any | None = Field(default=None, exclude=True, repr=False)
     cmc_snapshot: Any | None = Field(default=None, exclude=True, repr=False)
+    cmc_mapping_status: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
     structural_book_snapshots: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     # Run-local acquisition evidence; never accepted from CLI or serialized as config.
     price_precision_snapshot: dict[str, InstrumentPrecision | None] | None = Field(
@@ -983,7 +984,15 @@ class ScannerRunner:
         cmc_service = None
         if run_config.cmc_mode != "off":
             from app.cmc.runtime import begin_collection
-            cmc_service = await begin_collection()
+            try:
+                cmc_service = await begin_collection()
+            except Exception as exc:
+                self.logger.warning("CMC construction unavailable: %s", type(exc).__name__)
+            if run_config.cmc_mode == "shadow" and cmc_service is None:
+                from app.cmc.models import Snapshot
+                retained_snapshot = run_config.cmc_snapshot or Snapshot()
+                run_config = run_config.model_copy(update={"cmc_snapshot": retained_snapshot.model_copy(update={
+                    "errors":(*retained_snapshot.errors[-15:], "collector_construction_failure:unavailable")})})
         process_memory_readings: list[ProcessMemoryReading] = [
             _safe_process_memory_reading(self.process_memory_sampler)
         ]
@@ -1052,7 +1061,14 @@ class ScannerRunner:
                 # Metadata and derivative acquisition predate this logical cutoff.
                 run_config = run_config.model_copy(update={"decision_timestamp": normalize_utc_timestamp(self.clock())})
             if cmc_service is not None:
-                run_config = run_config.model_copy(update={"cmc_snapshot": cmc_service.snapshot})
+                run_config = run_config.model_copy(update={"cmc_snapshot":
+                    getattr(cmc_service, "research_snapshot", cmc_service.snapshot)})
+                from app.cmc.identity import binding_status, IdentityStatus
+                manifest = getattr(getattr(cmc_service, "collector", None), "manifest", None)
+                if manifest is not None:
+                    run_config = run_config.model_copy(update={"cmc_mapping_status": {
+                        b.contract_symbol: "OWNER_APPROVED_MAPPING" for b in manifest.bindings
+                        if binding_status(b, run_config.decision_timestamp) == IdentityStatus.OWNER_APPROVED}})
             if run_config.macro_event_context_enabled:
                 macro_event_snapshot = await self._build_macro_event_snapshot(
                     run_config,
@@ -1130,6 +1146,13 @@ class ScannerRunner:
                         timeout_status="request_timeout" if isinstance(exc, ExchangeTimeoutError) else "none",
                         category="PROVIDER_FAILURE" if isinstance(exc, ExchangeClientError) else "INTERNAL_ERROR",
                     )
+                if run_config.cmc_mode == "shadow":
+                    from app.cmc.scanner_context import scanner_context
+                    symbol_result = symbol_result.model_copy(update={"cmc_context": scanner_context(
+                        run_config.cmc_snapshot, symbol=symbol_result.symbol,
+                        cutoff=run_config.decision_timestamp,
+                        assessed_at=normalize_utc_timestamp(self.capture_clock()),
+                        mapping_status=run_config.cmc_mapping_status.get(symbol_result.symbol))})
                 if macro_event_snapshot is not None:
                     symbol_result = apply_macro_event_context_to_symbol_result(
                         symbol_result,
@@ -3087,10 +3110,8 @@ class ScannerRunner:
         shadow, causal = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
         supporting_context = optional_data.supporting_context
         cmc_context = optional_data.cmc_context
-        if optional_data.cmc_snapshot is not None:
-            from app.cmc.scanner_context import scanner_context
-            cmc_context = scanner_context(optional_data.cmc_snapshot, symbol=symbol,
-                cutoff=optional_data.derivatives_decision_cutoff, assessed_at=normalize_utc_timestamp(self.capture_clock()))
+        # Run's per-result boundary attaches SHADOW context once, including early
+        # failures, preserving its immutable strategy cutoff and mapping status.
         if supporting_context is not None:
             flow_snapshot = self._supporting_snapshot(self.microstructure_flow_service, symbol, strategy_execution.microstructure_flow)
             book_snapshot = self._supporting_snapshot(self.order_book_liquidity_service, symbol, strategy_execution.order_book_liquidity)

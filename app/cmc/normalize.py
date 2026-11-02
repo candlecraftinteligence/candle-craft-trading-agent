@@ -42,7 +42,10 @@ def observation(fetch: Fetch, metric: str, raw, *, units: str, source=None, scop
         scope=scope, provenance=fetch.raw_ref, window_seconds=window_seconds,
         funding_interval_seconds=funding_interval_seconds, max_age_seconds=max_age)
     fields.update(rate_semantics=rate_semantics, counting_convention=counting_convention)
-    return Observation(id=stable_id(fields), **fields)
+    # A nested Pydantic repr contains timezone implementation details (UTC vs
+    # JSON-restored TzInfo). Hash the same canonical instrument fields on restart.
+    identity_fields = {**fields, "instrument":instrument.model_dump(mode="json") if instrument else None}
+    return Observation(id=stable_id(identity_fields), **fields)
 
 
 def _usd(quotes):

@@ -17,6 +17,8 @@ from app.cmc.models import EvidenceState as S, Frozen, Instrument, Snapshot, sta
 from app.cmc.normalize import normalize_context, normalize_pair, observation
 from app.cmc.storage import Sidecar
 from app.cmc.profiles import CollectionProfile
+from app.cmc.acquisition import validate_family, family_complete
+from app.cmc.restart_cache import KIND, save_family, restore_family, restore_fetch
 from app.data.exchange_clients import BinanceFuturesClient
 
 
@@ -96,7 +98,7 @@ class Collector:
     async def collect(self) -> Snapshot:
         requests = (
             (Endpoint.LISTINGS, {"limit":100, "sort":"market_cap"}),
-            (Endpoint.MAP, {"limit":1000}),
+            (Endpoint.MAP, {"limit":1000, "sort":"cmc_rank", "aux":"is_active"}),
             (Endpoint.GLOBAL, {}), (Endpoint.FEAR_GREED, {}), (Endpoint.ALTCOIN, {}),
             (Endpoint.EXCHANGES, {"limit":100}),
             (Endpoint.EXCHANGE_PAIRS, {"exchange_slug":"binance", "category":"perpetual", "limit":250}),
@@ -112,11 +114,24 @@ class Collector:
         if not self.manifest.bindings:
             errors.append("identity_manifest_empty:asset_enrichment_unavailable")
         if self.profile and not self._restored:
+            committed = await asyncio.to_thread(self.store.causal, KIND, self.client.clock(), limit=64)
+            for row in committed:
+                try:
+                    restored = await asyncio.to_thread(restore_family, self.store, row, self.client.clock())
+                    key = row["request_key"]
+                    if key not in self._families:
+                        self._families[key] = restored
+                except (ValueError, KeyError, TypeError):
+                    errors.append("restart_cache:incomplete_or_invalid_family")
+                if len(self._families) >= self.profile.cache_entries:
+                    break
             saved = await asyncio.to_thread(self.store.causal, "collection_family", self.client.clock(), limit=64)
             for row in saved:
+                if len(self._families) >= self.profile.cache_entries:
+                    break
                 key = row["request_key"]
                 if key not in self._families:
-                    self._families[key] = tuple(Fetch.model_validate(f) for f in row["fetches"])
+                    self._families[key] = tuple(restore_fetch(f) for f in row["fetches"])
                 if len(self._families) >= self.profile.cache_entries:
                     break
             self._restored = True
@@ -126,10 +141,9 @@ class Collector:
                 continue
             if family and family.limit is not None:
                 params = {**params, "limit": family.limit}
-            if endpoint == Endpoint.MAP and self.manifest.bindings:
-                # Symbol is only a bounded acquisition filter. Exact reviewed
-                # numeric IDs, slugs and independent metadata still own identity.
-                params = {**params, "symbol": ",".join(b.binance_base for b in self.manifest.bindings)}
+            # Unfiltered bounded pagination avoids provider whole-batch failures
+            # on Unicode/multiplier/native symbols. Only numeric ID + exact slug
+            # + independent native metadata may bind an instrument afterwards.
             key = stable_id((endpoint, params))
             previous = self._families.get(key, ())
             if previous:
@@ -176,9 +190,7 @@ class Collector:
                     while len(self._families) > self.profile.cache_entries:
                         self._families.popitem(last=False)
                     try:
-                        await asyncio.to_thread(self.store.put, "collection_family", {
-                            "request_key":key, "fetches":[f.model_dump(mode="json") for f in current]},
-                            acquired_at=self.client.clock())
+                        await asyncio.to_thread(save_family, self.store, key, current)
                     except ValueError:
                         errors.append(endpoint.value+":restart_cache_payload_budget")
         metadata, metadata_at = self._metadata
@@ -207,8 +219,32 @@ class Collector:
                     await provider.aclose()
         assets = {}
         asset_times = {}
+        # Retain partial raw evidence, but withhold the entire shared identity /
+        # pair family from contract enrichment until terminal coverage is proven.
+        withheld = set()
+        map_required_ids = {b.cmc_id for b in self.manifest.bindings}
+        map_found_ids = set()
+        for endpoint in (Endpoint.MAP, Endpoint.EXCHANGE_PAIRS, Endpoint.CRYPTO_PAIRS):
+            family_fetches = [f for f in fetched if f.endpoint == endpoint]
+            if endpoint == Endpoint.CRYPTO_PAIRS:
+                groups = {}
+                for f in family_fetches:
+                    groups.setdefault(f.request_params.get("crypto_id"), []).append(f)
+                valid = all(validate_family(group) for group in groups.values())
+            elif endpoint == Endpoint.MAP:
+                valid = not family_fetches or validate_family(family_fetches,required_ids=map_required_ids or None)
+                map_found_ids = {a["id"] for f in family_fetches if not f.error for a in rows(endpoint,f.data)
+                    if isinstance(a,dict) and isinstance(a.get("id"),int)}
+                if valid and family_fetches and not family_complete(family_fetches):
+                    errors = [e for e in errors if e != endpoint.value+":page_budget_partial"]
+                    errors.append("map_requested_ids_complete:global_catalog_pagination_partial")
+            else:
+                valid = not family_fetches or validate_family(family_fetches)
+            if not valid:
+                withheld.add(endpoint)
+                errors.append(endpoint.value+":incomplete_or_ambiguous_family_withheld")
         for result in fetched:
-            if result.endpoint == Endpoint.MAP and not result.error:
+            if result.endpoint == Endpoint.MAP and not result.error and Endpoint.MAP not in withheld:
                 for asset in result.data:
                     if not isinstance(asset,dict) or not isinstance(asset.get("id"),int):
                         errors.append("invalid_cmc_id_map_row")
@@ -233,6 +269,8 @@ class Collector:
                 await asyncio.to_thread(self.store.put, "raw", {
                     "payload":result.raw_text if result.raw_text is not None else result.raw},
                     acquired_at=result.acquired_at, identity=result.raw_ref)
+            if result.endpoint in withheld:
+                continue
             if result.endpoint in {Endpoint.EXCHANGE_PAIRS,Endpoint.CRYPTO_PAIRS} and not result.error:
                 exchange = {k:result.data.get(k) for k in ("exchange_id", "exchange_slug")}
                 for pair in rows(result.endpoint, result.data):
@@ -282,6 +320,11 @@ class Collector:
             "batch_id":snapshot.batch_id, "capabilities":self.client.capabilities,
             "profile":self.profile.name if self.profile else "LEGACY",
             "coverage":"PARTIAL" if errors else "REQUESTED_FAMILIES_ONLY",
+            "map_identity_coverage":{"scope":"EXACT_MANIFEST_IDS_ONLY", "required_ids":sorted(map_required_ids),
+                "missing_ids":sorted(map_required_ids-map_found_ids),
+                "requested_ids_complete":bool(map_required_ids) and Endpoint.MAP not in withheld
+                    and map_required_ids <= map_found_ids,
+                "provider_pagination_complete":family_complete([f for f in fetched if f.endpoint == Endpoint.MAP])},
             "usage":self.store.credit_summary(acquired), "errors":errors,
             "sources":[{"endpoint":f.endpoint.value,"acquired_at":f.acquired_at.isoformat(),"raw_ref":f.raw_ref,
                         "authenticated":f.authenticated,"credits_reported":f.credits_reported,

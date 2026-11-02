@@ -79,6 +79,8 @@ def match_instrument(pair: dict, exchange: dict, metadata: dict, binding: AssetB
         return reject("timezone required", EvidenceState.UNVERIFIED)
     if require_owner_approval and binding_status(binding, as_of) != IdentityStatus.OWNER_APPROVED:
         return reject("current exact-contract owner approval required", EvidenceState.UNVERIFIED)
+    if (binding.contract_multiplier != 1 or binding.binance_base in {"1000LUNC", "1000PEPE", "1000SHIB"}):
+        return reject("independent multiplier qualification remains unverified", EvidenceState.UNVERIFIED)
     expiry = binding.expires_at or binding.approved_at + timedelta(days=30)
     if expiry.tzinfo is None or as_of >= expiry:
         return reject("asset binding expired", EvidenceState.STALE)
