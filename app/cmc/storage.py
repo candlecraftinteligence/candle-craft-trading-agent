@@ -113,6 +113,24 @@ class Sidecar:
                 (kind, as_of.isoformat(), as_of.isoformat(), min(limit, self.max_records))).fetchall()
         return [json.loads(row[0]) for row in records]
 
+    def records_by_id(self, identities, as_of: datetime):
+        """Bounded indexed cache reads, with original causal/retention constraints."""
+        if as_of.tzinfo is None or not 1 <= len(identities) <= 128:
+            raise ValueError("bounded causal fragment query required")
+        at = as_of.astimezone(UTC)
+        cutoff = at - timedelta(days=self.retention_days)
+        marks = ",".join("?" for _ in identities)
+        with self.connect() as db:
+            size = db.execute(f"SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM evidence WHERE id IN ({marks})",
+                tuple(identities)).fetchone()[0]
+            if size > 32 * 1024 * 1024:
+                raise ValueError("restart fragment read budget")
+            records = db.execute(f"""SELECT id,payload FROM evidence WHERE id IN ({marks})
+                AND kind='collection_page_fragment' AND acquired_at BETWEEN ? AND ?
+                AND (source_at IS NULL OR source_at<=?)""",
+                (*identities, cutoff.isoformat(), at.isoformat(), at.isoformat())).fetchall()
+        return {key:json.loads(body) for key, body in records}
+
     def reserve(self, at: datetime, credits: int, *, daily: int, monthly: int, record_request: bool = True) -> bool:
         if at.tzinfo is None or credits < 0 or daily < 0 or monthly < 0:
             raise ValueError("negative credit budget")

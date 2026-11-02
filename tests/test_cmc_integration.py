@@ -137,6 +137,14 @@ def test_all_scanner_modes_preserve_canonical_results_with_absent_provider(monke
                 _config(["BTCUSDT"],enable_strategy_output=False,decision_timestamp=AT,cmc_mode=mode.value))
             item=result.results[0].model_dump(mode="json")
             item.pop("runtime_seconds")
+            context = item.pop("cmc_context")
+            if mode == Mode.SHADOW:
+                assert context["acquisition_status"] == "COLLECTOR_FAILURE"
+                assert context["context_status"] == "STALE_OR_UNAVAILABLE"
+                assert context["setup_authority"] is False and context["observations"] == []
+                assert context["strategy_cutoff"] == AT.isoformat()
+            else:
+                assert context is None
             outputs.append(item)
         assert all(item==outputs[0] for item in outputs)
     asyncio.run(scenario())

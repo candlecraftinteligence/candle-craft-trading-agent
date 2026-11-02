@@ -1,0 +1,48 @@
+{
+  "baseline_commit": "0086e9e508e9b4b75f1a6c0c0c8210be5260c326",
+  "branch": "codex/cci-v2-combined-prerequisites",
+  "python": "Windows 3.12.10, existing project environment",
+  "receipts": {
+    "baseline": {
+      "tests": "84",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "20.825",
+      "failed_tests": []
+    },
+    "focused": {
+      "tests": "424",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "173.921",
+      "failed_tests": []
+    },
+    "local_full_before_final_repairs": {
+      "tests": "4737",
+      "failures": "2",
+      "errors": "0",
+      "skipped": "0",
+      "time": "2395.404",
+      "failed_tests": [
+        "test_inventory_anchors_match_source",
+        "test_cmc_deadline_remains_30_and_timeout_does_not_join_sidecar_work"
+      ]
+    },
+    "final_repair_regression": {
+      "tests": "87",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "24.307",
+      "failed_tests": []
+    }
+  },
+  "compileall": "PASS",
+  "pip_check": "PASS",
+  "git_diff_check": "PASS",
+  "exact_candidate_full_ci": "Required on PR; see GitHub checks and final owner handoff",
+  "runtime_access_or_activation": false,
+  "current_identity_approval_count": 0
+}

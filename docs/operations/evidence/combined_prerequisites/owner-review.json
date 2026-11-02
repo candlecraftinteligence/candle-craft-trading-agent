@@ -1,0 +1,1928 @@
+{
+  "label": "DEV research review inventory; no activation or identity approval",
+  "historical_roster_count": 55,
+  "latest_roster_equality": "Unverified: expanded Runtime rows not supplied",
+  "latest_staging_reported_candidates": 55,
+  "currently_approved_mappings": 0,
+  "historical_manifest_sha256": "0166e316c86a6f304879addb21e19bab057c5967c490108d140bf15ee900098f",
+  "identities": [
+    {
+      "symbol": "BTCUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": {
+        "cmc_id": 1,
+        "cmc_slug": "bitcoin",
+        "exchange_id": 270,
+        "market_id": 47150,
+        "acquired_at": "2026-11-01T13:06:56.072524Z",
+        "expires_at": "2026-11-08T13:06:56.072524Z",
+        "evidence_ref": "sha256:179cb686dd673f88bba0fc03b008580c1c94ab1cfc763296ddb9557c6472772e;sha256:d4c4940fc0d2d962653bd3c8d7f8ecb9fd6529c6cd323db95e65d4399c2b8613;sha256:043b769f4195bb9e41cfa5f0cf001e3bf2aa9093da5793ca2e5dd7da0025ee1a;sha256:fc7d6ed90b4712e7228555b5bd1486e138dd8763257cbc17222b6b4baf08ca66"
+      },
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ETHUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": {
+        "cmc_id": 1027,
+        "cmc_slug": "ethereum",
+        "exchange_id": 270,
+        "market_id": 47205,
+        "acquired_at": "2026-11-01T13:06:56.072524Z",
+        "expires_at": "2026-11-08T13:06:56.072524Z",
+        "evidence_ref": "sha256:179cb686dd673f88bba0fc03b008580c1c94ab1cfc763296ddb9557c6472772e;sha256:d4c4940fc0d2d962653bd3c8d7f8ecb9fd6529c6cd323db95e65d4399c2b8613;sha256:043b769f4195bb9e41cfa5f0cf001e3bf2aa9093da5793ca2e5dd7da0025ee1a;sha256:fc7d6ed90b4712e7228555b5bd1486e138dd8763257cbc17222b6b4baf08ca66"
+      },
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "BNBUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "XRPUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": {
+        "cmc_id": 52,
+        "cmc_slug": "xrp",
+        "exchange_id": 270,
+        "market_id": 47207,
+        "acquired_at": "2026-11-01T13:06:56.072524Z",
+        "expires_at": "2026-11-08T13:06:56.072524Z",
+        "evidence_ref": "sha256:179cb686dd673f88bba0fc03b008580c1c94ab1cfc763296ddb9557c6472772e;sha256:d4c4940fc0d2d962653bd3c8d7f8ecb9fd6529c6cd323db95e65d4399c2b8613;sha256:043b769f4195bb9e41cfa5f0cf001e3bf2aa9093da5793ca2e5dd7da0025ee1a;sha256:fc7d6ed90b4712e7228555b5bd1486e138dd8763257cbc17222b6b4baf08ca66"
+      },
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "SOLUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": {
+        "cmc_id": 5426,
+        "cmc_slug": "solana",
+        "exchange_id": 270,
+        "market_id": 67944,
+        "acquired_at": "2026-11-01T13:06:56.072524Z",
+        "expires_at": "2026-11-08T13:06:56.072524Z",
+        "evidence_ref": "sha256:179cb686dd673f88bba0fc03b008580c1c94ab1cfc763296ddb9557c6472772e;sha256:d4c4940fc0d2d962653bd3c8d7f8ecb9fd6529c6cd323db95e65d4399c2b8613;sha256:043b769f4195bb9e41cfa5f0cf001e3bf2aa9093da5793ca2e5dd7da0025ee1a;sha256:fc7d6ed90b4712e7228555b5bd1486e138dd8763257cbc17222b6b4baf08ca66"
+      },
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "TRXUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ZECUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "XMRUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "LINKUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ADAUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "XLMUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "NEARUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "BCHUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "UNIUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "LTCUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "SUIUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "GRAMUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "HBARUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "1000SHIBUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review",
+        "independent_multiplier_qualification_required; no prefix stripping"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ENAUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "QNTUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "TAOUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review",
+        "independent_multiplier_qualification_required; no prefix stripping"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ONDOUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "PUMPUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "DOTUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "WLFIUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "SKYUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "WLDUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ICPUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ARBUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review",
+        "owner_staging_reports_market_1238049_exclusions_volume; remains_withheld"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ETCUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "POLUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "KASUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ALGOUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "JUPUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "LITUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "RENDERUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "FILUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "INJUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "NIGHTUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "CAKEUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "DASHUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "STXUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ETHFIUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "APTUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "\u5e01\u5b89\u4eba\u751fUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review",
+        "native_Unicode_identity_retained; symbol_filter_400; ranked_map_research_only"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "AEROUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "TRUMPUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    },
+    {
+      "symbol": "1000LUNCUSDT",
+      "binding_state": "UNAPPROVED",
+      "approved": false,
+      "owner_approval_ref": null,
+      "approved_at": null,
+      "historical_candidate": "N/A: latest expanded 55-row capture not supplied on DEV",
+      "source_evidence": [
+        {
+          "file": "runtime_audits/universe_review.json",
+          "sha256": "ec132944b8f0e96d347cca40a17fb44db032e1ad7b01f2c11e4a2a761421d3ea",
+          "acquired_at": "2026-11-01T13:50:32.300541Z"
+        },
+        {
+          "source": "owner-provided Runtime staging handoff, 2026-11-02; research only",
+          "claim": "55 provisional candidates; zero approved; semantics unverified",
+          "raw_capture_on_dev": "N/A"
+        }
+      ],
+      "withholding_reasons": [
+        "no_current_owner_approved_mapping",
+        "refresh_exact_sources_before_review",
+        "independent_multiplier_qualification_required; no prefix stripping"
+      ],
+      "required_approval": "Fresh exact ID/slug/native perpetual/exchange/market/multiplier binding, expiry, owner approval reference",
+      "separate_semantic_verification": {
+        "oi_counting_convention": "Unverified",
+        "oi_units": "Unverified",
+        "funding_interval": "Unverified",
+        "funding_semantics": "Unverified",
+        "index_currency": "Unverified"
+      }
+    }
+  ],
+  "collection_economics": {
+    "basis": "planning_upper_bound_before_provider_receipts; not current account usage",
+    "families": [
+      {
+        "endpoint": "/v1/global-metrics/quotes/latest",
+        "seconds": 1800,
+        "pages": 1,
+        "credits_per_poll": 1,
+        "polls_per_day": 48
+      },
+      {
+        "endpoint": "/v5/derivatives/liquidations/quotes/latest",
+        "seconds": 1800,
+        "pages": 1,
+        "credits_per_poll": 1,
+        "polls_per_day": 48
+      },
+      {
+        "endpoint": "/v1/cryptocurrency/map",
+        "seconds": 86400,
+        "pages": 4,
+        "credits_per_poll": 0,
+        "polls_per_day": 1
+      },
+      {
+        "endpoint": "/v5/exchange/derivatives/list",
+        "seconds": 86400,
+        "pages": 1,
+        "credits_per_poll": 1,
+        "polls_per_day": 1
+      },
+      {
+        "endpoint": "/v5/exchange/derivatives/market-pairs/list/latest",
+        "seconds": 14400,
+        "pages": 4,
+        "credits_per_poll": 4,
+        "polls_per_day": 6
+      }
+    ],
+    "normal_daily": 121,
+    "retry_daily": 363,
+    "days": 31,
+    "normal_month": 3751,
+    "retry_month": 11253,
+    "daily_reservation_cap": 388,
+    "monthly_reservation_cap": 11988,
+    "retry_daily_headroom": 25,
+    "retry_month_headroom": 735,
+    "account_entitlement_staging": 15000,
+    "account_remaining_last_staging_observation": 14984,
+    "account_remaining_now": "N/A",
+    "provider_usage_since_staging": "N/A",
+    "separate_validation_ledger_spending": "N/A: requires reconciliation, not a second provider debit",
+    "existing_runtime_reservations": "N/A: retain ledger; reconcile before activation",
+    "application_allowances_previous": {
+      "daily": 400,
+      "monthly": 12000
+    },
+    "account_and_application_ledgers_added_together": false
+  },
+  "contract_freshness": {
+    "cadence_seconds": 14400,
+    "unchanged_source_max_age_seconds": 300,
+    "ideal_time_coverage_upper_bound": 0.020833333333333332,
+    "expected_worst_age_before_next_poll_seconds": 14400,
+    "assumptions": "zero source lag, immediate success, eligible approved mapping; actual coverage can be zero",
+    "measured_metrics": [
+      "verified_global_results / analyzed_results",
+      "verified_contract_results / analyzed_results",
+      "approved_mapped_symbols / eligible_symbols",
+      "complete_pair_batches / attempted_pair_batches",
+      "source_age_p50_p95_max_seconds",
+      "acquisition_latency_p95_seconds",
+      "budget_exhausted_results / analyzed_results"
+    ]
+  },
+  "global_freshness_zero_lag": {
+    "cadence_seconds": 1800,
+    "unchanged_source_max_age_seconds": 300,
+    "ideal_time_coverage_upper_bound": 0.16666666666666666,
+    "expected_worst_age_before_next_poll_seconds": 1800,
+    "assumptions": "zero source lag, immediate success, eligible approved mapping; actual coverage can be zero",
+    "measured_metrics": [
+      "verified_global_results / analyzed_results",
+      "verified_contract_results / analyzed_results",
+      "approved_mapped_symbols / eligible_symbols",
+      "complete_pair_batches / attempted_pair_batches",
+      "source_age_p50_p95_max_seconds",
+      "acquisition_latency_p95_seconds",
+      "budget_exhausted_results / analyzed_results"
+    ]
+  },
+  "global_freshness_hypothetical_60s_lag": {
+    "cadence_seconds": 1800,
+    "unchanged_source_max_age_seconds": 240,
+    "ideal_time_coverage_upper_bound": 0.13333333333333333,
+    "expected_worst_age_before_next_poll_seconds": 1800,
+    "assumptions": "zero source lag, immediate success, eligible approved mapping; actual coverage can be zero",
+    "measured_metrics": [
+      "verified_global_results / analyzed_results",
+      "verified_contract_results / analyzed_results",
+      "approved_mapped_symbols / eligible_symbols",
+      "complete_pair_batches / attempted_pair_batches",
+      "source_age_p50_p95_max_seconds",
+      "acquisition_latency_p95_seconds",
+      "budget_exhausted_results / analyzed_results"
+    ]
+  },
+  "runtime_resource_readiness": "BLOCKED: reported free physical RAM below historical role peaks plus floor; CMC incremental Runtime RSS and commit headroom unmeasured",
+  "staging_usage_reconciliation": {
+    "account_entitlement": 15000,
+    "account_used_before_validation": 4,
+    "validation_ledger_reported_credits": 12,
+    "validation_requests": 18,
+    "account_used_after_validation": 16,
+    "remaining_at_observation": 14984,
+    "remaining_now": "N/A",
+    "effective_daily": 388,
+    "effective_monthly": 11988,
+    "explanation": "12 validation credits consume the account once; reduced application allowances reserve headroom, not a second account debit. Existing October Runtime reservations remain retained in the same sidecar ledger."
+  }
+}

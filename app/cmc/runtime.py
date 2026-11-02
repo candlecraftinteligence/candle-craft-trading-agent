@@ -72,6 +72,15 @@ class Service:
                 "deadline_extended": False,
             }
 
+    @property
+    def research_snapshot(self):
+        """Annotate assessment failure without replacing the frozen acquired batch."""
+        outcome = (self.last_acquisition or {}).get("outcome")
+        if outcome is None or outcome == "completed":
+            return self.snapshot
+        return self.snapshot.model_copy(update={"errors":
+            (*self.snapshot.errors[-15:], "collector_acquisition_failure:"+outcome)})
+
     async def close(self):
         self.closed = True
         if self.task and not self.task.done():

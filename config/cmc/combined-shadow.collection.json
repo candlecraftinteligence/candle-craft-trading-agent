@@ -1,0 +1,16 @@
+{
+  "name": "CUSTOM",
+  "families": [
+    {"endpoint": "/v1/global-metrics/quotes/latest", "seconds": 1800},
+    {"endpoint": "/v5/derivatives/liquidations/quotes/latest", "seconds": 1800},
+    {"endpoint": "/v1/cryptocurrency/map", "seconds": 86400, "limit": 5000, "max_pages": 4},
+    {"endpoint": "/v5/exchange/derivatives/list", "seconds": 86400, "limit": 100},
+    {"endpoint": "/v5/exchange/derivatives/market-pairs/list/latest", "seconds": 14400, "limit": 250, "max_pages": 4}
+  ],
+  "concurrency": 1,
+  "requests_per_minute": 20,
+  "cache_entries": 16,
+  "max_body_bytes": 1048576,
+  "max_observations": 1000,
+  "retention_days": 30
+}
