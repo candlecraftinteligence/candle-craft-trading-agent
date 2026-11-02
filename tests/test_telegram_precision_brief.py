@@ -43,16 +43,17 @@ def render(alert=TelegramAlertType.SIGNAL_CONFIRMED, **changes):
 
 def test_precise_evidence_levels_and_native_controls():
     html = render()
-    assert "Sweep: wick 253.5 below swing low 254." in html
-    assert "5m CHoCH: candle closed 257 above 256.8." in html
+    assert "Wick 253.5 swept below the 254 swing low." in html
+    assert "The 5m CHoCH candle closed at 257 above 256.8." in html
     assert "closed back" not in html  # A sweep flag alone is not reclaim-close evidence.
-    assert '<table compact>' in html and '<details><summary>Evidence details</summary>' in html
+    assert '<table compact>' in html and '<details>' not in html
     assert html.count(PUBLIC_TRADE_MAP_RISK_WARNING) == 1
-    assert html.index("Invalidation:") < html.index("<details>")
+    assert html.index("TRADE MAP") < html.index("WHAT HAPPENED") < html.index("ENTRY PLAN") < html.index("INVALIDATION")
     assert "hard stop on price contact at or below 250.06" in html
     assert "QNTUSDT.P" in html and "BINANCE%3A" in html
     assert 'type="copy_text"' in html and "Copy levels" in html
     assert "Hunt" not in html and "Score" not in html and "✓" not in html
+    assert "Observed setup" not in html and "Market bias" not in html and "Derivatives:" not in html
 
 
 def test_short_evidence_uses_upside_sweep_and_close_below():
@@ -60,7 +61,7 @@ def test_short_evidence_uses_upside_sweep_and_close_below():
                        sweep_wick=Decimal("261"), structure_direction="bearish",
                        structure_level=Decimal("258"), structure_close=Decimal("257"))
     html = render(direction="short", edge_evidence=evidence)
-    assert "wick 261 above swing high 260" in html and "closed 257 below 258" in html
+    assert "Wick 261 swept above the 260 swing high" in html and "closed at 257 below 258" in html
     assert "at or above 250.06" in html
 
 
@@ -69,7 +70,7 @@ def test_missing_and_contradictory_evidence_never_invents_confirmation():
     assert "Setup evidence: N/A" in html and "Sweep:" not in html and "CHoCH" not in html
     evidence = replace(message().edge_evidence, sweep_wick=Decimal("260"), structure_close=Decimal("250"))
     html = render(edge_evidence=evidence)
-    assert html.count("Unverified") >= 3
+    assert "Sweep detail: Unverified" in html and "Structure detail: Unverified" in html
     assert "candle closed" not in html and "closed back" not in html
 
 
@@ -77,12 +78,12 @@ def test_missing_and_contradictory_evidence_never_invents_confirmation():
 def test_pending_states_and_conditions_remain_explicit(alert):
     html = render(alert)
     assert "CONFIRMATION" in html and "5m close above 256.8." in html
-    assert "<i>CONFIRMED" not in html
+    assert "<b>CONFIRMED" not in html
 
 
 def test_confirmed_message_with_pending_context_is_not_promoted_by_formatter():
     html = render(actionability_state="CONFIRMATION_REQUIRED")
-    assert "<i>CONFIRMED" not in html
+    assert "<b>CONFIRMED" not in html
 
 
 def test_effective_context_levels_override_message_without_changing_geometry():
@@ -90,6 +91,54 @@ def test_effective_context_levels_override_message_without_changing_geometry():
                                    stop_loss=Decimal("90"), tp1=Decimal("110"), tp2=Decimal("120"), tp3=Decimal("130"))
     html = render(signal_context=context)
     assert "100 – 101" in html and "255.33" not in html
+    assert "Wait for price to return to 100 – 101, then look for a clear bullish reaction." in html
+    assert "hard stop on price contact at or below 90" in html
+    assert "Entry-zone evidence: Unverified (does not match the stored plan)." in html
+
+
+def test_confirmed_entry_plan_names_the_zone_without_requiring_confirmation_again():
+    html = render()
+    assert "<b>CONFIRMED</b>" in html
+    assert "Wait for price to return to 255.33 – 256.2, then look for a clear bullish reaction." in html
+    assert "If price stalls in the zone or trades below it without a convincing push higher, treat the entry with caution." in html
+    assert "5m close above 256.8." not in html
+    assert "body-closes" not in html and "accepts below" not in html
+
+
+def test_already_engaged_zone_does_not_tell_readers_to_wait_for_a_touch_or_claim_a_fill():
+    html = render(zone_active=True)
+    assert "Entry zone 255.33 – 256.2 engaged. Look for a clear bullish reaction." in html
+    assert "treat the entry with caution. Actual exchange fill: Unverified." in html
+    assert "Wait for price to return" not in html
+
+
+@pytest.mark.parametrize("zone_active", [False, True])
+def test_short_entry_reaction_warning_is_mirrored_and_keeps_the_full_caution(zone_active):
+    html = render(direction="short", zone_active=zone_active)
+    assert "look for a clear bearish reaction." in html.lower()
+    assert "If price stalls in the zone or trades above it without a convincing push lower, treat the entry with caution." in html
+    assert "bullish reaction" not in html and "push higher" not in html
+    assert "hard stop on price contact at or above 250.06" in html
+
+
+@pytest.mark.parametrize("direction", [None, "N/A", "unknown"])
+def test_missing_reaction_direction_does_not_invent_a_bullish_or_bearish_condition(direction):
+    html = render(direction=direction)
+    assert "Reaction direction: N/A." in html
+    entry_plan = html.split("<h4>ENTRY PLAN</h4>", 1)[1].split("<h4>INVALIDATION</h4>", 1)[0]
+    assert "bullish" not in entry_plan and "bearish" not in entry_plan
+
+
+def test_entry_reaction_direction_comes_from_canonical_context():
+    html = render(signal_context=SignalMessageContext(direction="short"))
+    assert "look for a clear bearish reaction." in html
+    assert "trades above it without a convincing push lower" in html
+
+
+@pytest.mark.parametrize("low,high", [(None, Decimal("256.2")), (Decimal("256.2"), None),
+                                     (Decimal("257"), Decimal("255"))])
+def test_confirmed_entry_plan_never_invents_a_missing_or_reversed_zone(low, high):
+    assert "Entry plan: N/A (stored entry zone unavailable/inconsistent)." in render(entry_low=low, entry_high=high)
 
 
 def test_source_text_is_escaped_in_html_and_copy_attribute():
@@ -100,9 +149,16 @@ def test_source_text_is_escaped_in_html_and_copy_attribute():
 
 def test_risk_and_target_caution_are_visible_not_collapsed():
     html = render(target_failure_severity="target_caution_actionable", target_warning_reason="TP2 inside range.")
-    assert html.index("TP1 priority") < html.index("<details>")
+    assert html.index("INVALIDATION") < html.index("TP1 priority") < html.index("<footer>")
     assert "TP2 inside range." in html
     assert html.count(PUBLIC_TRADE_MAP_RISK_WARNING) == 1
+
+
+def test_target_warning_uses_canonical_context_instead_of_stale_message_text():
+    context = SignalMessageContext(target_failure_severity="target_caution_actionable",
+                                   target_warning_reason="TP2 inside the 271–273 range.")
+    html = render(signal_context=context, target_warning_reason="Stale warning.")
+    assert "TP2 inside the 271–273 range." in html and "Stale warning." not in html
 
 
 @pytest.mark.parametrize("exchange,expected", [("binance", "BINANCE"), ("bybit", "BYBIT")])
@@ -137,8 +193,23 @@ def test_lifecycle_updates_are_short_and_do_not_claim_realized_profit_or_moved_s
         html = render(alert)
         assert len(html) < 700 and "Unverified" in html
         assert "secured" not in html and "Move SL" not in html and "Hunt" not in html
-    assert "Next tracked: TP2 271.41" in render(TelegramAlertType.TP1_HIT)
+    assert "Next: TP2 271.41" in render(TelegramAlertType.TP1_HIT)
     assert "Zone contact only" in render(TelegramAlertType.LIMIT_HIT)
+    assert "structural entry confirmation" not in render(TelegramAlertType.LIMIT_HIT)
+
+
+@pytest.mark.parametrize("alert,label,level", [
+    (TelegramAlertType.LIMIT_HIT, "🎯 QNTUSDT · ENTRY ZONE ENGAGED", "255.33 – 256.2"),
+    (TelegramAlertType.TP1_HIT, "✅ QNTUSDT · TP1 HIT", "258.99"),
+    (TelegramAlertType.TP2_HIT, "✅ QNTUSDT · TP2 HIT", "271.41"),
+    (TelegramAlertType.TP3_HIT, "✅ QNTUSDT · TP3 HIT", "276.38"),
+    (TelegramAlertType.SL_HIT, "🛑 QNTUSDT · SL HIT", "250.06"),
+])
+def test_channel_updates_name_only_the_recorded_event_and_its_level(alert, label, level):
+    html = render(alert)
+    assert label in html and level in html
+    assert "TRADE MAP" not in html and "WHAT HAPPENED" not in html
+    assert "Simulated tracking" in html and "Unverified" in html
 
 
 def test_coalesced_targets_preserve_recorded_milestones():

@@ -1,9 +1,12 @@
 """Presentation travels through the real admission/reservation/recovery path."""
 import hashlib
 
+import pytest
+
 from app.alerts.telegram_lifecycle import TelegramLifecycleDeliveryService, SQLiteTelegramAlertAttemptRepository
 from app.alerts.telegram_rich_message import is_rich_message
 from app.core.config import Settings
+from app.lifecycle.models import SetupLifecycleState
 from test_triggered_confirmed_telegram_delivery import _public_setup_symbol, _make_lifecycle_retry_due
 from test_telegram_lifecycle_delivery_phase42 import FakeSender, _run_result, run
 
@@ -32,6 +35,17 @@ def test_precision_public_signal_is_durable_and_not_resent_after_restart(tmp_pat
     restarted = FakeSender()
     repeated = run(service(path, restarted).deliver_for_run(_run_result(symbol), scan_run_id="precision-repeat"))
     assert repeated.sent == 0 and restarted.messages == []
+
+
+@pytest.mark.parametrize("state", [SetupLifecycleState.WATCHLISTED, SetupLifecycleState.STALKING,
+                                  SetupLifecycleState.TRIGGERED])
+def test_precision_style_does_not_admit_unconfirmed_channel_signals(tmp_path, state):
+    sender = FakeSender()
+    symbol = _public_setup_symbol(signal_id=f"precision-{state.value}", state=state,
+                                  previous=SetupLifecycleState.WATCHLISTED)
+    result = run(service(tmp_path / "precision-gates.db", sender).deliver_for_run(
+        _run_result(symbol), scan_run_id=f"precision-gate-{state.value}"))
+    assert result.sent == 0 and sender.messages == []
 
 
 def test_recovery_preserves_saved_format_even_after_style_rolls_back(tmp_path):
