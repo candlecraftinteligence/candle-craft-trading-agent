@@ -46,6 +46,8 @@ from app.data.normalizers.binance import (
     normalize_binance_open_interest_history,
     normalize_binance_ticker,
 )
+from app.microstructure.metadata_refresh import StreamMetadataRefresher
+from app.microstructure.stream_evidence import StreamEvidence
 
 
 class BinanceFuturesClient(PublicHTTPExchangeClient):
@@ -73,6 +75,7 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         )
         self._exchange_info_lock = asyncio.Lock()
         self._exchange_info_snapshot = None
+        self._stream_metadata_refresher = StreamMetadataRefresher(self.get_stream_contract_metadata)
         self._funding_schedule_lock = asyncio.Lock()
         self._funding_schedule_snapshot = None
 
@@ -157,15 +160,39 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         payload, _ = await self._exchange_info()
         return copy.deepcopy(payload)
 
-    async def get_stream_contract_metadata(self, *, capture_clock=None):
-        payload, acquired = await self._exchange_info(capture_clock)
+    async def get_stream_contract_metadata(self, *, capture_clock=None, max_age_seconds=300):
+        capture_clock = capture_clock or default_capture_clock
+        payload, acquired = await self._exchange_info(capture_clock, max_age_seconds=max_age_seconds)
+        validation = StreamEvidence(capture_clock or default_capture_clock)
+        validation.set_metadata(payload, acquired.acquired_at)
+        if validation.metadata_issue:
+            # Do not let a poisoned source cache prevent the bounded retry
+            # from acquiring a corrected response before another lease expires.
+            async with self._exchange_info_lock:
+                if self._exchange_info_snapshot is not None and self._exchange_info_snapshot[1] is payload:
+                    self._exchange_info_snapshot = None
         return copy.deepcopy(payload), acquired.acquired_at
 
-    async def _exchange_info(self, capture_clock=None):
+    async def maintain_stream_contract_metadata(self, services, *, capture_clock=None):
+        await self._stream_metadata_refresher.start(services, clock=capture_clock or default_capture_clock)
+
+    async def aclose(self):
+        await self._stream_metadata_refresher.stop()
+        await super().aclose()
+
+    async def _exchange_info(self, capture_clock=None, *, max_age_seconds=300):
+        if not 0 < max_age_seconds <= 300:
+            raise ValueError("exchange metadata cache age must be within (0, 300]")
         async with self._exchange_info_lock:
             if self._exchange_info_snapshot is not None:
                 expires, payload, acquired = self._exchange_info_snapshot
-                if time.monotonic() < expires:
+                source_current = True
+                if capture_clock is not None:
+                    now = capture_clock()
+                    source_age = (now - acquired.acquired_at).total_seconds() if acquired.acquired_at else -1
+                    source_current = 0 <= source_age < max_age_seconds
+                if (time.monotonic() < expires - (300 - max_age_seconds)
+                        and source_current):
                     return payload, acquired
             payload = await self._get_json(ENDPOINT_BINANCE_EXCHANGE_INFO)
             if not isinstance(payload, Mapping):

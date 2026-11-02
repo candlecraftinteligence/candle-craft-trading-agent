@@ -78,6 +78,7 @@ def test_runner_telemetry_survives_combination_storage_hydration_and_reporting(
             ))
         finally:
             await book.snapshot_client.aclose()
+            await market.aclose()
             await market.http.aclose()
 
     scanned = asyncio.run(scan())
@@ -85,6 +86,10 @@ def test_runner_telemetry_survives_combination_storage_hydration_and_reporting(
     assert all(expected[field] for field in TELEMETRY_FIELDS)
     assert expected["derivatives_prefetch"]["acquired"] == 1
     assert set(expected["stream_health"]) == {"aggregate_flow", "order_book", "liquidations"}
+    for health in expected["stream_health"].values():
+        assert health["metadata_refresh"]["attempts"] == 1
+        assert health["metadata_refresh"]["renewals"] == 1
+        assert health["metadata_refresh"]["last_error"] is None
     assert expected["stream_health"]["aggregate_flow"]["per_symbol"]["BTCUSDT"]["source_event_age_seconds"] is None
     assert expected["analysis_worker"]["concurrency_bound"] == 1
     assert expected["cmc_acquisition"]["mode"] == "off"

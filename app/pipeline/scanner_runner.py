@@ -2836,6 +2836,10 @@ class ScannerRunner:
         if not services or config.exchange != "binance":
             return
         underlying = client.client if isinstance(client, CachedMarketDataClient) else client
+        maintain = getattr(underlying, "maintain_stream_contract_metadata", None)
+        if callable(maintain):
+            await maintain(services, capture_clock=self.capture_clock)
+            return
         method = getattr(underlying, "get_stream_contract_metadata", None)
         payload, acquired_at = {}, None
         if callable(method):

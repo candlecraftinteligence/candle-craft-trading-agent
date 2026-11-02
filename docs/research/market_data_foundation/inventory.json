@@ -30,7 +30,7 @@
     "code_refs": [
       {
         "path": "app/data/exchange_clients/binance_futures.py",
-        "line": 112,
+        "line": 115,
         "contains": "\"/fapi/v1/klines\""
       },
       {
@@ -153,7 +153,7 @@
     "code_refs": [
       {
         "path": "app/data/exchange_clients/binance_futures.py",
-        "line": 145,
+        "line": 148,
         "contains": "\"/fapi/v1/ticker/24hr\""
       },
       {
@@ -250,12 +250,12 @@
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 4903,
+        "line": 4907,
         "contains": "def _derivatives_enrichment_input("
       },
       {
         "path": "app/pipeline/scanner_runner.py",
-        "line": 4928,
+        "line": 4932,
         "contains": "def _derivatives_rejection("
       },
       {

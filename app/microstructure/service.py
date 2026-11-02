@@ -123,7 +123,7 @@ class MicrostructureFlowService:
         self.reconnect_max_seconds = float(reconnect_max_seconds)
         self.allow_legacy_missing_stream_type = bool(allow_legacy_missing_stream_type)
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.evidence = StreamEvidence(self.clock)
+        self.evidence = StreamEvidence(self.clock, on_admission_change=self._metadata_admission_changed)
         self.sleep = sleep or asyncio.sleep
         self.logger = log or logger
         self._lifecycle_lock = asyncio.Lock()
@@ -190,6 +190,15 @@ class MicrostructureFlowService:
         self._active_symbols.clear()
         for aggregator in self._aggregators.values():
             aggregator.mark_disconnected(self.clock())
+
+    def _metadata_admission_changed(self, symbol, valid):
+        aggregator = self._aggregators.get(symbol)
+        if aggregator is None:
+            return
+        if not valid:
+            aggregator.mark_disconnected(self.clock())
+        elif self._connection is not None:
+            aggregator.mark_connected(self.clock())
 
     async def reconcile_symbols(self, symbols: Sequence[str]) -> tuple[str, ...]:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
@@ -354,6 +363,10 @@ class MicrostructureFlowService:
         aggregator = self._aggregators.get(event.symbol)
         if aggregator is None or event.symbol not in self._desired_symbols:
             self._ignored_message_count += 1
+            return False
+        if not self.evidence.accepts_event_times(event.symbol, event.event_time, event.trade_time,
+                max_age=self.stale_after_seconds):
+            self.evidence.decoded(event.symbol, event.event_time, accepted=False)
             return False
         accepted = aggregator.ingest(event)
         self.evidence.decoded(event.symbol, event.event_time, accepted=accepted)

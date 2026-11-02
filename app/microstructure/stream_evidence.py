@@ -7,10 +7,19 @@ from datetime import datetime
 
 from app.microstructure.websocket_protocol import matches_usdt_perpetual, is_subscription_ack
 
+METADATA_MAX_AGE_SECONDS = 300
+
 
 class StreamEvidence:
-    def __init__(self, clock):
+    def __init__(self, clock, *, on_admission_change=None):
         self.clock = clock
+        self._on_admission_change = on_admission_change
+        self._desired = set()
+        self._admission = {}
+        self._latest_metadata_at = None
+        self._latest_identity = None
+        self.metadata_refresh = {}
+        self.rejected_event_time_count = 0
         self.contracts = None
         self.metadata_at = None
         self.metadata_issue = None
@@ -25,6 +34,10 @@ class StreamEvidence:
         self.history = deque(maxlen=32)
 
     def set_metadata(self, payload, acquired_at):
+        # Observe the old lease BEFORE replacing it, including quiet streams
+        # which received no events/assessments while metadata was expired.
+        for symbol in self._desired:
+            self.identity_reason(symbol)
         rows = payload.get("symbols", []) if isinstance(payload, dict) else []
         self.metadata_issue = None
         if not isinstance(rows, list) or not rows or len(rows) > 10000:
@@ -53,8 +66,30 @@ class StreamEvidence:
                     self.rejections[symbol] = "exchange_metadata_normalization_collision"
         self.contracts = frozenset(contracts)
         self.metadata_at = acquired_at
+        identity = (self.contracts, tuple(sorted(self.rejections.items())))
+        if acquired_at is not None:
+            if acquired_at > self.clock():
+                self.metadata_issue = "exchange_metadata_stale_or_future"
+            elif self._latest_metadata_at is not None and acquired_at < self._latest_metadata_at:
+                self.metadata_issue = "metadata_acquisition_regressed"
+            elif acquired_at == self._latest_metadata_at and identity != self._latest_identity:
+                self.metadata_issue = "conflicting_metadata_acquisition"
+            if self.metadata_issue is None:
+                self._latest_metadata_at, self._latest_identity = acquired_at, identity
+        for symbol in self._desired:
+            self.identity_reason(symbol)
 
     def identity_reason(self, symbol):
+        reason = self._identity_reason(symbol)
+        if self.contracts is not None and symbol in self._desired:
+            valid = reason is None
+            if self._admission.get(symbol) is not valid:
+                self._admission[symbol] = valid
+                if self._on_admission_change is not None:
+                    self._on_admission_change(symbol, valid)
+        return reason
+
+    def _identity_reason(self, symbol):
         if self.contracts is None:
             return None  # Legacy/injected services expose unverified metadata in health.
         if self.metadata_issue:
@@ -64,7 +99,18 @@ class StreamEvidence:
         if self.metadata_at is None or self.metadata_at.tzinfo is None:
             return "metadata_acquisition_unverified"
         age = (self.clock()-self.metadata_at).total_seconds()
-        return None if 0 <= age <= 300 else "exchange_metadata_stale_or_future"
+        return None if 0 <= age <= METADATA_MAX_AGE_SECONDS else "exchange_metadata_stale_or_future"
+
+    def accepts_event_times(self, symbol, *timestamps, max_age):
+        now = self.clock()
+        if all(0 <= (now-at).total_seconds() <= max_age for at in timestamps):
+            return True
+        self.rejected_event_time_count += 1
+        # An expired/future observation cannot contribute to a complete window.
+        if self._on_admission_change is not None:
+            self._on_admission_change(symbol, False)
+            self._on_admission_change(symbol, True)
+        return False
 
     def matches(self, symbol, pair=None):
         return matches_usdt_perpetual(symbol, pair) and self.identity_reason(symbol) is None
@@ -101,9 +147,13 @@ class StreamEvidence:
         return False
 
     def retain(self, desired):
+        self._desired = set(desired)
+        self._admission = {s:v for s,v in self._admission.items() if s in desired}
         self.symbols = {s:v for s,v in self.symbols.items() if s in desired}
         self.subscription_versions = {s:v for s,v in self.subscription_versions.items() if s in desired}
         self.acknowledged.intersection_update(desired)
+        for symbol in desired:
+            self.identity_reason(symbol)
 
     def decoded(self, symbol, event_at, *, accepted):
         now = self.clock()
@@ -131,8 +181,10 @@ class StreamEvidence:
     def health(self, desired):
         now = self.clock()
         metadata_status = ("Unverified" if self.contracts is None or self.metadata_at is None or self.metadata_issue
-            else "VERIFIED" if 0 <= (now-self.metadata_at).total_seconds() <= 300 else "STALE")
+            else "VERIFIED" if 0 <= (now-self.metadata_at).total_seconds() <= METADATA_MAX_AGE_SECONDS else "STALE")
         return {"metadata_status": metadata_status,
+            "metadata_refresh": dict(self.metadata_refresh),
+            "rejected_event_time_count": self.rejected_event_time_count,
             "metadata_issue": self.metadata_issue,
             "metadata_acquired_at": self.metadata_at.isoformat() if self.metadata_at else None,
             "subscription_requested_count": self.request_count, "subscription_ack_count": self.ack_count,
