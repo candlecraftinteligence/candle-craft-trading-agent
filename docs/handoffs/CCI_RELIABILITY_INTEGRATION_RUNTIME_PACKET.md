@@ -1,5 +1,18 @@
 # Reliability integration and Runtime verification packet
 
+DEV scope update: Runtime access, preflight and deployment are explicitly outside
+this DEV task. There is no connection from this session to Runtime, and none is
+to be requested or established. The user will handle rollout with Codex directly
+on Runtime. Use `CCI_RUNTIME_DEPLOYMENT_HANDOFF.md` for the concise self-contained
+handoff; the following Runtime requirements are documentation for that session.
+
+Integration update, 2026-10-24: the owner separately approved integration only.
+PRs #141-146 are now merged, preserving accepted commits. Verified main is
+`6785cf6c5a5d4c083f31a280c2ca1555bc7df88c`, with exact-main Astra approval and
+successful push CI. See `CCI_RELIABILITY_INTEGRATION_RESULT.md` for the immutable
+receipt. The preparation and proposed sequence below are retained as the approved
+historical plan. Runtime requirements remain unfulfilled and separately authorized.
+
 Prepared in DEV, 2026-10-24. State: **PARTIALLY_RESOLVED**. This packet authorizes
 no merge, deployment, service change or production access. All Runtime evidence
 below is still required. The current DEV assignment permits code, synthetic
@@ -67,8 +80,8 @@ and present that immutable release candidate for a separate Runtime decision.
 
 The reported host is `DESKTOP-G7M42AL`; the reported code path is
 `C:\Users\aspir\Desktop\Candle Craft Inteligence`. These are supplied identities,
-not a verified current connection. DEV must not mount, query, copy or inspect the
-live database. No established authorized Runtime connection is assumed here.
+to be independently checked locally by the separate Runtime Codex session. DEV
+must not mount, query, copy or inspect the live database or seek Runtime access.
 
 Before proposing cutover, obtain bounded, sanitized evidence on Runtime:
 
@@ -149,9 +162,11 @@ Resource advisories alone never grant capacity approval or weaken signal policy.
 
 Journal exhaustion means incomplete diagnostic history, not an opportunity to
 delete evidence. Archive/generation management requires its own reviewed procedure.
-The bounded current receipt continues until a critical integrity failure; unknown,
-torn or missing established sidecars require an operator decision, not automatic
-repair. An independent observer and an archive plan remain operational work.
+The bounded current receipt continues until a critical integrity failure. Unknown
+or torn existing files and a missing journal known to be established fail closed.
+Missing lock markers or receipts are not universally detected as lost history;
+preserve every sidecar and require operator review rather than deleting evidence.
+An independent observer and an archive plan remain operational work.
 
 ## Honest completion boundary
 
