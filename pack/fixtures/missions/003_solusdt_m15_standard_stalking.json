@@ -1,0 +1,48 @@
+{
+  "cci_setup_id": "mock_setup_sol_m15_stalking",
+  "symbol": "SOLUSDT",
+  "timeframe": "M15",
+  "direction": "LONG",
+  "quality_tier": "STANDARD",
+  "title": "Pullback into prior demand",
+  "thesis_summary": "Synthetic M15 long in stalking. A displacement leg left a demand pocket, and price has returned to it without a confirmed reclaim. Waiting is the state, not a fill.",
+  "evidence": [
+    {
+      "type": "structure",
+      "label": "Demand pocket",
+      "detail": "The last bullish displacement origin is the area under watch."
+    },
+    {
+      "type": "liquidity",
+      "label": "Equal lows",
+      "detail": "Nearby equal lows are still intact. A sweep is not recorded."
+    },
+    {
+      "type": "invalidation",
+      "label": "Pocket failure",
+      "detail": "A body close through the demand pocket invalidates the long."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_sol_m15_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-20T16:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_sol_m15_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-20T18:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_sol_m15_03",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "STALKING",
+      "occurred_at": "2026-09-21T07:15:00Z"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true
+}

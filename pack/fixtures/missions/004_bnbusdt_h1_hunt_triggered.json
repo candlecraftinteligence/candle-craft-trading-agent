@@ -1,0 +1,54 @@
+{
+  "cci_setup_id": "mock_setup_bnb_h1_triggered",
+  "symbol": "BNBUSDT",
+  "timeframe": "H1",
+  "direction": "LONG",
+  "quality_tier": "HUNT",
+  "title": "Break of the stalking range",
+  "thesis_summary": "Synthetic H1 long marked HUNT. Price swept the stalking-range low and displaced back through the range high. The fixture records a trigger. It does not record an entry fill.",
+  "evidence": [
+    {
+      "type": "liquidity",
+      "label": "Stalking-range sweep",
+      "detail": "The range low was taken before the displacement candle."
+    },
+    {
+      "type": "structure",
+      "label": "Displacement",
+      "detail": "The trigger candle closed through the stalking-range high."
+    },
+    {
+      "type": "invalidation",
+      "label": "Sweep extreme",
+      "detail": "A close beyond the sweep extreme ends the long."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_bnb_h1_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-21T06:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_bnb_h1_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-21T07:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_bnb_h1_03",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "STALKING",
+      "occurred_at": "2026-09-21T08:10:00Z"
+    },
+    {
+      "cci_event_id": "evt_bnb_h1_04",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TRIGGERED",
+      "occurred_at": "2026-09-21T10:40:00Z"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true
+}

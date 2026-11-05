@@ -1,0 +1,60 @@
+{
+  "cci_setup_id": "mock_setup_xrp_h4_confirmed",
+  "symbol": "XRPUSDT",
+  "timeframe": "H4",
+  "direction": "SHORT",
+  "quality_tier": "STANDARD",
+  "title": "Higher-timeframe continuation",
+  "thesis_summary": "Synthetic H4 short that has reached confirmation. Structure shifted, the pullback held, and the fixture state is CONFIRMED. Outcome is still open.",
+  "evidence": [
+    {
+      "type": "structure",
+      "label": "Bearish shift",
+      "detail": "The prior protected high failed and a lower high printed."
+    },
+    {
+      "type": "level",
+      "label": "Pullback shelf",
+      "detail": "The last bearish order block held as the pullback shelf in this fixture."
+    },
+    {
+      "type": "invalidation",
+      "label": "Protected high",
+      "detail": "Acceptance above the shift high invalidates the short."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_xrp_h4_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-19T12:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_xrp_h4_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-19T15:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_xrp_h4_03",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "STALKING",
+      "occurred_at": "2026-09-20T08:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_xrp_h4_04",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TRIGGERED",
+      "occurred_at": "2026-09-20T13:20:00Z"
+    },
+    {
+      "cci_event_id": "evt_xrp_h4_05",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "CONFIRMED",
+      "occurred_at": "2026-09-21T04:05:00Z"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true
+}
